@@ -14,7 +14,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.6"
+APP_VERSION = "v5.7"
 
 # Globale Variable für den Fortschritt
 PROGRESS_STATE = {"status": "Bereit", "percent": 0}
@@ -119,40 +119,84 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
     matched_indices_2 = set()
     diff_data = []
     block_id = 0
+    matches = {} 
     
-    PROGRESS_STATE = {"status": "Indiziere Daten (Hash-Map)...", "percent": 15}
+    PROGRESS_STATE = {"status": "Suche nach 100% Treffern...", "percent": 15}
     exact_map_2 = {}
     for j, (raw2, cols2) in enumerate(parsed2):
         key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
         if key2 not in exact_map_2: exact_map_2[key2] = []
         exact_map_2[key2].append(j)
         
-    total_p1 = len(parsed1)
-    
-    PROGRESS_STATE = {"status": "Gleiche Datensätze ab...", "percent": 20}
     for i, (raw1, cols1) in enumerate(parsed1):
-        # Progress-Update alle X Iterationen (um UI nicht zu blockieren)
-        if total_p1 > 0 and i % max(1, total_p1 // 50) == 0:
-            PROGRESS_STATE = {"status": f"Vergleiche Zeilen ({i}/{total_p1})...", "percent": 20 + int(60 * (i / total_p1))}
-            
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
-        
-        best_j = -1
         if key1 in exact_map_2:
             for j in exact_map_2[key1]:
                 if j not in matched_indices_2:
-                    best_j = j
+                    matches[i] = (j, 100.0)
                     matched_indices_2.add(j)
                     break
                     
-        if best_j != -1:
-            raw2, cols2 = parsed2[best_j]
+    total_p1 = len(parsed1)
+    
+    # Logic aus 5.4: Fuzzy-Suche mit Längen-Notbremse
+    PROGRESS_STATE = {"status": "Suche Ähnlichkeiten (Fuzzy)...", "percent": 20}
+    for i, (raw1, cols1) in enumerate(parsed1):
+        if total_p1 > 0 and i % max(1, total_p1 // 50) == 0:
+            PROGRESS_STATE = {"status": f"Fuzzy-Analyse ({i}/{total_p1})...", "percent": 20 + int(60 * (i / total_p1))}
+            
+        if i in matches: continue
+        key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
+        if not key1: continue 
+        
+        best_j = -1
+        best_ratio = 0.0
+        
+        for j, (raw2, cols2) in enumerate(parsed2):
+            if j in matched_indices_2: continue
+            key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
+            if not key2: continue
+            
+            # --- TURBO-BOOST v5.4 Logik ---
+            sm = difflib.SequenceMatcher(None, key1, key2)
+            # Brich sofort ab, wenn Längen so unterschiedlich sind, dass 60% unmöglich ist
+            if sm.real_quick_ratio() * 100 < 60.0: continue
+            if sm.quick_ratio() * 100 < 60.0: continue
+            
+            ratio = sm.ratio() * 100
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_j = j
+                
+        if best_j != -1 and best_ratio >= 60.0:
+            matches[i] = (best_j, best_ratio)
+            matched_indices_2.add(best_j)
+            
+    PROGRESS_STATE = {"status": "Erstelle Datenstruktur...", "percent": 85}
+    for i, (raw1, cols1) in enumerate(parsed1):
+        if i in matches:
+            j, key_ratio = matches[i]
+            raw2, cols2 = parsed2[j]
+            
+            if key_ratio == 100.0:
+                tag = 'equal'
+                left_html = [html.escape(raw1)]
+                right_html = [html.escape(raw2)]
+            else:
+                tag = 'replace'
+                # --- DOORS-NOTBREMSE v5.4 Logik ---
+                if len(raw1) > 5000 or len(raw2) > 5000:
+                    left_html = [html.escape(raw1)]
+                    right_html = [html.escape(raw2)]
+                else:
+                    left_html, right_html = get_inline_diff([raw1], [raw2])
+                
             diff_data.append({
-                'id': block_id, 'tag': 'equal',
-                'left': [html.escape(raw1)], 'right': [html.escape(raw2)],
+                'id': block_id, 'tag': tag,
+                'left': left_html, 'right': right_html,
                 'raw_left': raw1.splitlines(keepends=True) if raw1 else [],
                 'raw_right': raw2.splitlines(keepends=True) if raw2 else [],
-                'ratio': 100.0 
+                'ratio': round(key_ratio, 1) 
             })
         else:
             diff_data.append({
@@ -164,7 +208,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             })
         block_id += 1
         
-    PROGRESS_STATE = {"status": "Erfasse neue Datensätze...", "percent": 85}
+    PROGRESS_STATE = {"status": "Erfasse neue Datensätze...", "percent": 95}
     for j, (raw2, cols2) in enumerate(parsed2):
         if j not in matched_indices_2:
             diff_data.append({
@@ -257,7 +301,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(html_content.encode('utf-8'))
             
         elif self.path == '/api/progress':
-            # NEU v5.6: Polling Endpoint für Fortschritt
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -387,13 +430,13 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .spinner { border: 6px solid #333; border-top: 6px solid var(--accent); border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin-bottom: 25px; }
                 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
                 .loading-text { font-size: 24px; font-weight: bold; letter-spacing: 1px; }
+                .loading-subtext { font-size: 14px; color: #aaa; margin-top: 10px; }
             </style>
         </head>
         <body>
             <div id="loading-overlay">
                 <div class="spinner"></div>
                 <div class="loading-text">Berechne Unterschiede...</div>
-                <!-- NEU v5.6: Fortschrittsanzeige (Ladebalken) -->
                 <div style="width: 350px; margin-top: 20px;">
                     <div style="width: 100%; background: #444; height: 12px; border-radius: 6px; overflow: hidden; border: 1px solid #555;">
                         <div id="progress-bar" style="width: 0%; background: var(--accent); height: 100%; transition: width 0.2s linear;"></div>
@@ -492,7 +535,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 let activeFilter = 'all'; 
                 let currentZoom = 13; 
                 let isSummaryVisible = true;
-                let progressInterval = null; // NEU v5.6
+                let progressInterval = null;
                 
                 const leftEditor = document.getElementById('left-editor');
                 const rightEditor = document.getElementById('right-editor');
@@ -812,14 +855,13 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     });
                 }
 
-                // NEU v5.6: Polling-Funktion für den Backend-Fortschritt
                 async function pollProgress() {
                     try {
                         let res = await fetch('/api/progress');
                         if (res.ok) {
                             let data = await res.json();
                             document.getElementById('progress-bar').style.width = data.percent + '%';
-                            document.getElementById('progress-text').textContent = data.status + ' (' + data.percent + '%)';
+                            document.getElementById('progress-text').textContent = data.status;
                         }
                     } catch(e) {}
                 }
@@ -827,7 +869,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 async function triggerDiffUpdate() {
                     toggleLoading(true); 
                     
-                    // Starte das Polling-Interval (klopft alle 250ms beim Server an)
                     progressInterval = setInterval(pollProgress, 250);
                     
                     const isCsv = checkCsvMode();
@@ -847,7 +888,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     } catch (e) {
                         console.error("Fehler beim Diff:", e);
                     } finally {
-                        // Polling beenden und Ladescreen verstecken
                         clearInterval(progressInterval);
                         toggleLoading(false); 
                     }
@@ -1007,9 +1047,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
         </html>
         """
 
-# NEU v5.6: Multithreading-Klasse für asynchrone Progress-Anfragen
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    """Ermöglicht dem Server, die Progress-Anfragen zu beantworten, während der Haupt-Diff läuft."""
     daemon_threads = True
 
 def start_app():
@@ -1021,7 +1059,6 @@ def start_app():
     START_FILE_RIGHT = waehle_datei_dialog("Wähle die RECHTE Datei")
     if not START_FILE_RIGHT: return
     
-    # Nutzt jetzt den ThreadedServer statt des blockierenden Standard-Servers
     server = ThreadedHTTPServer(('localhost', 0), DiffRequestHandler)
     port = server.server_port 
     
