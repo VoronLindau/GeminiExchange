@@ -9,7 +9,7 @@ from tkinter import filedialog
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- App Konfiguration ---
-APP_VERSION = "v4.8"
+APP_VERSION = "v4.9"
 
 def waehle_datei_dialog(titel):
     root = tk.Tk()
@@ -25,12 +25,29 @@ def waehle_datei_dialog(titel):
     root.destroy() 
     return file_path
 
+# --- NEU v4.9: Intelligente Encoding-Erkennung für DOORS & Windows ---
+def read_file_safe(file_path):
+    # 1. utf-8-sig: Entfernt das unsichtbare BOM (Byte Order Mark) von DOORS Next
+    # 2. cp1252: Der Standard für deutsche Windows-Systeme (ANSI)
+    # 3. iso-8859-1: Internationaler Fallback
+    encodings = ['utf-8-sig', 'cp1252', 'iso-8859-1']
+    
+    for enc in encodings:
+        try:
+            with open(file_path, 'r', encoding=enc) as f:
+                return f.readlines()
+        except UnicodeDecodeError:
+            continue # Wenn es crasht, probiere das nächste Format
+            
+    # Absoluter Notfall-Fallback
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.readlines()
+
 def get_file_info(file_path):
     if not file_path or not os.path.exists(file_path):
         return {"path": "", "content": [], "siblings": []}
     
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        content = f.readlines()
+    content = read_file_safe(file_path)
         
     directory = os.path.dirname(file_path)
     valid_ext = ('.txt', '.ini', '.cfg', '.py', '.xml', '.csv', '.md', '.json', '.gcode')
@@ -70,8 +87,9 @@ def get_inline_diff(lines_left, lines_right):
 
 def parse_csv_line(line, delimiter=';'):
     """CSV Parser mit einstellbarem Trennzeichen."""
-    try: return next(csv.reader([line.strip()], delimiter=delimiter))
-    except: return [line.strip()]
+    # rstrip('\r\n') verhindert, dass leere Zeilenumbrüche am Ende die Spalten verrücken
+    try: return next(csv.reader([line.rstrip('\r\n')], delimiter=delimiter))
+    except: return [line.rstrip('\r\n')]
 
 def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
     """Vergleicht CSV zeilenunabhängig basierend NUR auf den Werten der gewählten Spalten."""
@@ -83,7 +101,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
     block_id = 0
     matches = {} 
     
-    # 1. Exakte Schlüssel-Treffer finden
     exact_map_2 = {}
     for j, (raw2, cols2) in enumerate(parsed2):
         key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
@@ -99,7 +116,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
                     matched_indices_2.add(j)
                     break
                     
-    # 2. Fuzzy Durchlauf: Ähnliche Schlüssel finden (über 60%)
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches: continue
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
@@ -113,7 +129,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
             if not key2: continue
             
-            # Die Fuzzy-Wahrscheinlichkeit wird NUR anhand der Spalten-Werte berechnet
             ratio = difflib.SequenceMatcher(None, key1, key2).ratio() * 100
             if ratio > best_ratio:
                 best_ratio = ratio
@@ -123,13 +138,11 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
-    # 3. HTML-Daten zusammenbauen
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches:
             j, key_ratio = matches[i]
             raw2, cols2 = parsed2[j]
             
-            # Wenn der Schlüssel zu 100% passt, ist es ein 'equal' - EGAL was im Rest der Zeile steht!
             if key_ratio == 100.0:
                 tag = 'equal'
                 left_html = [html.escape(raw1)]
@@ -142,7 +155,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
                 'id': block_id, 'tag': tag,
                 'left': left_html, 'right': right_html,
                 'raw_left': [raw1], 'raw_right': [raw2],
-                'ratio': round(key_ratio, 1) # Die Ratio bezieht sich immer auf die Spalte!
+                'ratio': round(key_ratio, 1) 
             })
         else:
             diff_data.append({
@@ -153,7 +166,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             })
         block_id += 1
         
-    # 4. Alle verbleibenden aus File 2 sind neue Zeilen
     for j, (raw2, cols2) in enumerate(parsed2):
         if j not in matched_indices_2:
             diff_data.append({
@@ -359,7 +371,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 <div class="top-bar">
                     <div class="pane-header left">
                         <div class="file-controls">
-                            <div class="file-path" id="path-left" ondblclick="changeFile('left')">INITIAL_PATH_LEFT</div>
+                            <div class="file-path" id="path-left" ondblclick="changeFile('left')" title="Doppelklick, um Datei lokal zu öffnen">INITIAL_PATH_LEFT</div>
                             <select id="dropdown-left" class="dir-dropdown" onchange="loadFileFromDropdown('left')"></select>
                         </div>
                         <div class="search-bar">
@@ -386,7 +398,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     
                     <div class="pane-header right">
                         <div class="file-controls">
-                            <div class="file-path" id="path-right" ondblclick="changeFile('right')">INITIAL_PATH_RIGHT</div>
+                            <div class="file-path" id="path-right" ondblclick="changeFile('right')" title="Doppelklick, um Datei lokal zu öffnen">INITIAL_PATH_RIGHT</div>
                             <select id="dropdown-right" class="dir-dropdown" onchange="loadFileFromDropdown('right')"></select>
                         </div>
                         <div class="search-bar">
@@ -467,7 +479,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 }
 
                 function showWaitingPrompt() {
-                    leftEditor.innerHTML = '<div style="padding: 30px; color: #007acc; font-size: 18px; font-weight: bold; line-height: 1.5;">🚀 CSV-Dateien erkannt!<br><br><span style="color:#aaa; font-size: 14px; font-weight: normal;">Bitte wähle oben in der blauen Werkzeugleiste das Trennzeichen und die Spalten aus und klicke auf "AKTUALISIEREN".</span></div>';
+                    leftEditor.innerHTML = '<div style="padding: 30px; color: #007acc; font-size: 18px; font-weight: bold; line-height: 1.5;">🚀 CSV-Dateien erkannt!<br><br><span style="color:#aaa; font-size: 14px; font-weight: normal;">Bitte wähle oben das Trennzeichen und die Spalten aus und klicke auf "AKTUALISIEREN".</span><br><br><span style="color:#888; font-size: 12px; font-weight: normal;">Tipp: Wenn du Export-Dateien aus DOORS Next nutzt, öffne sie am besten über einen Doppelklick auf den Dateipfad oben, statt per Drag&Drop. So werden alle DOORS-Sonderzeichen korrekt gelesen!</span></div>';
                     rightEditor.innerHTML = ''; svg.innerHTML = '';
                     document.getElementById('summary-content').innerHTML = '';
                     document.getElementById('statistics-content').innerHTML = '';
@@ -706,7 +718,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     });
                 }
 
-                // FIX v4.8: Immer das gesicherte globale State-Array "rawLeft" und "rawRight" ans Backend senden!
                 async function triggerDiffUpdate() {
                     toggleLoading(true); 
                     
