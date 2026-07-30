@@ -9,7 +9,7 @@ from tkinter import filedialog
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- App Konfiguration ---
-APP_VERSION = "v4.2"
+APP_VERSION = "v4.8"
 
 def waehle_datei_dialog(titel):
     root = tk.Tk()
@@ -68,23 +68,22 @@ def get_inline_diff(lines_left, lines_right):
         right_res.append(out_r)
     return left_res, right_res
 
-def parse_csv_line(line):
-    """Robuster CSV Parser für Komma oder Semikolon."""
-    delimiter = ';' if ';' in line else ','
+def parse_csv_line(line, delimiter=';'):
+    """CSV Parser mit einstellbarem Trennzeichen."""
     try: return next(csv.reader([line.strip()], delimiter=delimiter))
     except: return [line.strip()]
 
-def berechne_csv_diff(text1, text2, col_l, col_r):
-    """Vergleicht CSV zeilenunabhängig basierend auf den Spaltenwerten."""
-    parsed1 = [(line, parse_csv_line(line)) for line in text1]
-    parsed2 = [(line, parse_csv_line(line)) for line in text2]
+def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
+    """Vergleicht CSV zeilenunabhängig basierend NUR auf den Werten der gewählten Spalten."""
+    parsed1 = [(line, parse_csv_line(line, delimiter)) for line in text1]
+    parsed2 = [(line, parse_csv_line(line, delimiter)) for line in text2]
         
     matched_indices_2 = set()
     diff_data = []
     block_id = 0
     matches = {} 
     
-    # 1. Exakte Treffer finden
+    # 1. Exakte Schlüssel-Treffer finden
     exact_map_2 = {}
     for j, (raw2, cols2) in enumerate(parsed2):
         key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
@@ -93,18 +92,18 @@ def berechne_csv_diff(text1, text2, col_l, col_r):
         
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
-        if key1 and key1 in exact_map_2:
+        if key1 in exact_map_2:
             for j in exact_map_2[key1]:
                 if j not in matched_indices_2:
                     matches[i] = (j, 100.0)
                     matched_indices_2.add(j)
                     break
                     
-    # 2. Fuzzy Durchlauf: Ähnlichkeiten für den Rest finden (über 60%)
+    # 2. Fuzzy Durchlauf: Ähnliche Schlüssel finden (über 60%)
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches: continue
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
-        if not key1: continue
+        if not key1: continue 
         
         best_j = -1
         best_ratio = 0.0
@@ -112,7 +111,9 @@ def berechne_csv_diff(text1, text2, col_l, col_r):
         for j, (raw2, cols2) in enumerate(parsed2):
             if j in matched_indices_2: continue
             key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
+            if not key2: continue
             
+            # Die Fuzzy-Wahrscheinlichkeit wird NUR anhand der Spalten-Werte berechnet
             ratio = difflib.SequenceMatcher(None, key1, key2).ratio() * 100
             if ratio > best_ratio:
                 best_ratio = ratio
@@ -125,21 +126,23 @@ def berechne_csv_diff(text1, text2, col_l, col_r):
     # 3. HTML-Daten zusammenbauen
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches:
-            j, ratio = matches[i]
+            j, key_ratio = matches[i]
             raw2, cols2 = parsed2[j]
-            tag = 'equal' if ratio == 100.0 else 'replace'
             
-            if tag == 'replace':
-                left_html, right_html = get_inline_diff([raw1], [raw2])
-            else:
+            # Wenn der Schlüssel zu 100% passt, ist es ein 'equal' - EGAL was im Rest der Zeile steht!
+            if key_ratio == 100.0:
+                tag = 'equal'
                 left_html = [html.escape(raw1)]
                 right_html = [html.escape(raw2)]
+            else:
+                tag = 'replace'
+                left_html, right_html = get_inline_diff([raw1], [raw2])
                 
             diff_data.append({
                 'id': block_id, 'tag': tag,
                 'left': left_html, 'right': right_html,
                 'raw_left': [raw1], 'raw_right': [raw2],
-                'ratio': round(ratio, 1)
+                'ratio': round(key_ratio, 1) # Die Ratio bezieht sich immer auf die Spalte!
             })
         else:
             diff_data.append({
@@ -208,13 +211,10 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             info_l = get_file_info(START_FILE_LEFT)
             info_r = get_file_info(START_FILE_RIGHT)
             
-            if START_FILE_LEFT.lower().endswith('.csv') or START_FILE_RIGHT.lower().endswith('.csv'):
-                initial_diff = berechne_csv_diff(info_l['content'], info_r['content'], 0, 0)
-            else:
-                initial_diff = berechne_diff_daten(info_l['content'], info_r['content'])
-            
             html_content = self.get_html_template().replace(
-                "INITIAL_DIFF_DATA", json.dumps(initial_diff)
+                "INITIAL_RAW_LEFT", json.dumps(info_l['content'])
+            ).replace(
+                "INITIAL_RAW_RIGHT", json.dumps(info_r['content'])
             ).replace(
                 "INITIAL_FILES_LEFT", json.dumps(info_l['siblings'])
             ).replace(
@@ -255,7 +255,9 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             if data.get('isCsv', False):
                 col_l = max(0, int(data.get('colLeft', 1)) - 1)
                 col_r = max(0, int(data.get('colRight', 1)) - 1)
-                diff_data = berechne_csv_diff(data['textLeft'], data['textRight'], col_l, col_r)
+                delim = data.get('delimiter', ';')
+                if delim == '\\t': delim = '\t'
+                diff_data = berechne_csv_diff(data['textLeft'], data['textRight'], col_l, col_r, delim)
             else:
                 diff_data = berechne_diff_daten(data['textLeft'], data['textRight'])
             
@@ -278,9 +280,9 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .top-bar { display: flex; border-bottom: 2px solid #444; }
                 
                 #csv-toolbar { display: none; background: #004a7c; color: white; padding: 8px; text-align: center; font-size: 13px; font-weight: bold; border-bottom: 2px solid #005b99;}
-                #csv-toolbar input { width: 50px; text-align: center; background: #fff; border: none; padding: 3px; border-radius: 3px; font-weight: bold; margin: 0 5px;}
+                #csv-toolbar select { background: #fff; border: none; padding: 3px; border-radius: 3px; font-weight: bold; margin-right: 15px; outline: none; cursor: pointer; }
+                #csv-toolbar input { width: 40px; text-align: center; background: #fff; border: none; padding: 3px; border-radius: 3px; font-weight: bold; margin: 0 5px;}
                 #csv-toolbar button { background: #ff9800; color: #000; border: none; font-weight: bold; padding: 4px 15px; border-radius: 3px; cursor: pointer; margin-left: 15px;}
-                #csv-toolbar button:hover { background: #ffb74d; }
                 
                 .pane-header { flex: 1; padding: 10px 15px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
                 .pane-header.left { border-right: 1px solid #444; }
@@ -297,6 +299,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .delta-nav-version { color: var(--accent); font-weight: bold; }
                 .delta-nav-buttons button { background: #555; border: none; color: white; padding: 4px 12px; cursor: pointer; border-radius: 3px; font-size: 12px; }
                 .delta-nav-stats { font-size: 13px; font-weight: bold; color: #fff; font-family: monospace; margin-top: 2px;}
+                
+                .filter-btn { flex: 1; background: #007acc; color: white; border: none; padding: 3px 0; font-size: 10px; border-radius: 3px; cursor: pointer; transition: background 0.2s;}
+                .filter-btn:hover { background: #005b99; }
+                .filter-btn.toggle-active { background-color: #dc3545 !important; border-color: #dc3545 !important; font-weight: bold;}
+
                 #workspace { display: flex; flex: 1; overflow: hidden; position: relative; width: 100%; }
                 .editor-container { flex: 1; overflow-y: auto; overflow-x: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.5; padding: 10px 0; scroll-behavior: smooth; transition: background-color 0.2s; }
                 .editor-container::-webkit-scrollbar { width: 12px; height: 12px; }
@@ -307,7 +314,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 #summary-panel { width: 450px; flex-shrink: 0; background: #1e1e1e; border-left: 2px solid #555; display: flex; flex-direction: column; transition: width 0.3s; }
                 .summary-header { background: #333; padding: 8px; text-align: center; font-size: 12px; font-weight: bold; border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center;}
                 
-                /* Statistik Styling Version 4.2 */
                 #statistics-content { border-bottom: 2px solid #555; background: #252526; padding: 10px 15px; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px; }
                 .stat-header { font-weight: bold; color: #9cdcfe; margin-top: 5px; margin-bottom: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 1px;}
                 .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; padding-bottom: 2px;}
@@ -319,6 +325,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .summary-col { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px; font-family: 'Consolas', monospace; font-size: 11px; }
                 .summary-col.left { border-right: 1px solid #444; }
                 .code-block { padding: 2px 10px; white-space: pre; border-left: 3px solid transparent; border-right: 3px solid transparent; transition: background-color 0.3s; }
+                
                 .tag-equal { color: #d4d4d4; }
                 .tag-insert { background-color: var(--insert); border-right-color: var(--border-insert); }
                 .tag-delete { background-color: var(--delete); border-left-color: var(--border-delete); text-decoration: line-through; opacity: 0.7; }
@@ -328,15 +335,26 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .tag-insert .char-diff { background-color: rgba(40, 167, 69, 0.6); color: white; }
                 .tag-replace .char-diff { background-color: rgba(0, 123, 255, 0.6); color: white; }
                 .active-delta { outline: 2px solid #ff9800; background-color: rgba(255, 152, 0, 0.2) !important; z-index: 10; position: relative;}
-                .toggle-active { background-color: #dc3545 !important; border-color: #dc3545 !important; }
                 mark.search-hit { background-color: #ffeb3b; color: black; border-radius: 2px; padding: 0 2px; font-weight: bold; box-shadow: 0 0 4px #ffeb3b;}
                 mark.active-hit { background-color: #ff9800; color: white; box-shadow: 0 0 6px #ff9800; outline: 1px solid #fff;}
                 .percent-label { font-family: sans-serif; font-size: 10px; font-weight: bold; fill: #fff; text-anchor: middle; dominant-baseline: middle; }
                 .label-bg { fill: #007bff; rx: 4; ry: 4; }
                 .btn-excel { background-color: #217346; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; font-weight: bold; display: flex; align-items: center; gap: 4px; transition: background-color 0.2s;}
+                
+                #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; display: none; flex-direction: column; justify-content: center; align-items: center; color: white; font-family: 'Segoe UI', sans-serif;}
+                .spinner { border: 6px solid #333; border-top: 6px solid var(--accent); border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin-bottom: 25px; }
+                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                .loading-text { font-size: 24px; font-weight: bold; letter-spacing: 1px; }
+                .loading-subtext { font-size: 14px; color: #aaa; margin-top: 10px; }
             </style>
         </head>
         <body>
+            <div id="loading-overlay">
+                <div class="spinner"></div>
+                <div class="loading-text">Berechne Unterschiede...</div>
+                <div class="loading-subtext">Die Daten werden analysiert. Das kann bei großen Dateien etwas dauern.</div>
+            </div>
+
             <div id="header-container">
                 <div class="top-bar">
                     <div class="pane-header left">
@@ -359,7 +377,10 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             <button onclick="stepDelta(-1)">▲</button>
                             <button onclick="stepDelta(1)">▼</button>
                         </div>
-                        <button id="toggle-deltas-btn" onclick="toggleDeltas()" style="width: 90%; background:#007acc; color:white; border:none; padding:3px; font-size:10px; border-radius:3px; cursor:pointer;">Nur Deltas</button>
+                        <div style="display: flex; gap: 4px; width: 90%; margin-top: 2px;">
+                            <button id="toggle-deltas-btn" onclick="toggleDeltas()" class="filter-btn">Deltas</button>
+                            <button id="toggle-equals-btn" onclick="toggleEquals()" class="filter-btn">Gleiche</button>
+                        </div>
                         <div class="delta-nav-stats" id="delta-stats-display">0/0</div>
                     </div>
                     
@@ -379,10 +400,16 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 </div>
                 
                 <div id="csv-toolbar">
-                    🚀 CSV-Modus: Vergleiche basierend auf Spalte (Links) 
-                    <input type="number" id="csv-col-left" value="1" min="1"> 
-                    mit Spalte (Rechts) 
-                    <input type="number" id="csv-col-right" value="1" min="1">
+                    🚀 CSV-Modus: 
+                    Trennzeichen 
+                    <select id="csv-delimiter">
+                        <option value=";">Semikolon (;)</option>
+                        <option value=",">Komma (,)</option>
+                        <option value="\\t">Tabulator</option>
+                        <option value="|">Pipe (|)</option>
+                    </select>
+                    Vergleiche Spalte (Links) <input type="number" id="csv-col-left" value="1" min="1"> 
+                    mit Spalte (Rechts) <input type="number" id="csv-col-right" value="1" min="1">
                     <button onclick="triggerDiffUpdate()">AKTUALISIEREN</button>
                 </div>
             </div>
@@ -406,13 +433,16 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </div>
 
             <script>
-                let diffData = INITIAL_DIFF_DATA;
+                let diffData = []; 
+                let rawLeft = INITIAL_RAW_LEFT;
+                let rawRight = INITIAL_RAW_RIGHT;
                 let filesLeft = INITIAL_FILES_LEFT;
                 let filesRight = INITIAL_FILES_RIGHT;
                 
                 let deltaBlocks = [];
                 let currentDeltaIndex = -1;
                 let showOnlyDeltas = false;
+                let showOnlyEquals = false;
                 let currentZoom = 13; 
                 let isSummaryVisible = true;
                 
@@ -421,6 +451,10 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 const svgContainer = document.getElementById('svg-container');
                 const svg = document.getElementById('lines-svg');
                 
+                function toggleLoading(show) {
+                    document.getElementById('loading-overlay').style.display = show ? 'flex' : 'none';
+                }
+
                 function checkCsvMode() {
                     const pL = document.getElementById('path-left').textContent.toLowerCase().trim();
                     const pR = document.getElementById('path-right').textContent.toLowerCase().trim();
@@ -430,6 +464,14 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     } else {
                         tb.style.display = 'none'; return false;
                     }
+                }
+
+                function showWaitingPrompt() {
+                    leftEditor.innerHTML = '<div style="padding: 30px; color: #007acc; font-size: 18px; font-weight: bold; line-height: 1.5;">🚀 CSV-Dateien erkannt!<br><br><span style="color:#aaa; font-size: 14px; font-weight: normal;">Bitte wähle oben in der blauen Werkzeugleiste das Trennzeichen und die Spalten aus und klicke auf "AKTUALISIEREN".</span></div>';
+                    rightEditor.innerHTML = ''; svg.innerHTML = '';
+                    document.getElementById('summary-content').innerHTML = '';
+                    document.getElementById('statistics-content').innerHTML = '';
+                    document.getElementById('delta-stats-display').textContent = '0/0';
                 }
 
                 function updateDropdown(side, siblings, currentPath) {
@@ -478,14 +520,32 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function toggleDeltas() {
                     showOnlyDeltas = !showOnlyDeltas;
-                    const btn = document.getElementById('toggle-deltas-btn');
-                    if (showOnlyDeltas) {
-                        btn.classList.add('toggle-active');
-                        document.querySelectorAll('.tag-equal').forEach(el => el.style.display = 'none');
-                    } else {
-                        btn.classList.remove('toggle-active');
-                        document.querySelectorAll('.tag-equal').forEach(el => el.style.display = 'block');
-                    }
+                    if (showOnlyDeltas) showOnlyEquals = false; 
+                    applyFilters();
+                }
+
+                function toggleEquals() {
+                    showOnlyEquals = !showOnlyEquals;
+                    if (showOnlyEquals) showOnlyDeltas = false; 
+                    applyFilters();
+                }
+
+                function applyFilters() {
+                    document.getElementById('toggle-deltas-btn').classList.toggle('toggle-active', showOnlyDeltas);
+                    document.getElementById('toggle-equals-btn').classList.toggle('toggle-active', showOnlyEquals);
+
+                    document.querySelectorAll('.code-block').forEach(el => {
+                        el.style.display = 'block';
+                        if (showOnlyDeltas && el.classList.contains('tag-equal')) el.style.display = 'none';
+                        if (showOnlyEquals && !el.classList.contains('tag-equal')) el.style.display = 'none';
+                    });
+
+                    document.querySelectorAll('.summary-row').forEach(row => {
+                        row.style.display = 'flex';
+                        if (showOnlyDeltas && row.classList.contains('tag-equal')) row.style.display = 'none';
+                        if (showOnlyEquals && !row.classList.contains('tag-equal')) row.style.display = 'none';
+                    });
+
                     if (document.getElementById('search-input-left').value) executeSearch('left');
                     if (document.getElementById('search-input-right').value) executeSearch('right');
                     setTimeout(drawLines, 50); 
@@ -499,7 +559,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     setTimeout(drawLines, 300);
                 }
 
-                // --- NEU: Getrennte Statistik v4.2 ---
                 function updateStatistics() {
                     let statsL = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0 };
                     let statsR = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0 };
@@ -512,8 +571,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         statsR.total += linesR;
 
                         if (b.tag === 'equal') {
-                            statsL.exakt += linesL;
-                            statsR.exakt += linesR;
+                            statsL.exakt += linesL; statsR.exakt += linesR;
                         } else if (b.tag === 'delete') {
                             statsL.unmatch += linesL;
                         } else if (b.tag === 'insert') {
@@ -533,7 +591,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 <div class="stat-header">LINKS (Original)</div>
                                 <div class="stat-row"><span>Gesamtzeilen:</span> <span class="stat-num">${statsL.total}</span></div>
                                 <div class="stat-row"><span>Ohne Partner:</span> <span class="stat-num" style="color:#dc3545">${statsL.unmatch}</span></div>
-                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% Identisch:</span> <span class="stat-num">${statsL.exakt}</span></div>
+                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% (Spalte gleich):</span> <span class="stat-num">${statsL.exakt}</span></div>
                                 <div class="stat-row"><span>90% - 99%:</span> <span class="stat-num">${statsL.m90}</span></div>
                                 <div class="stat-row"><span>80% - 89%:</span> <span class="stat-num">${statsL.m80}</span></div>
                                 <div class="stat-row"><span>70% - 79%:</span> <span class="stat-num">${statsL.m70}</span></div>
@@ -544,7 +602,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 <div class="stat-header">RECHTS (Geändert)</div>
                                 <div class="stat-row"><span>Gesamtzeilen:</span> <span class="stat-num">${statsR.total}</span></div>
                                 <div class="stat-row"><span>Ohne Partner:</span> <span class="stat-num" style="color:#28a745">${statsR.unmatch}</span></div>
-                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% Identisch:</span> <span class="stat-num">${statsR.exakt}</span></div>
+                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% (Spalte gleich):</span> <span class="stat-num">${statsR.exakt}</span></div>
                                 <div class="stat-row"><span>90% - 99%:</span> <span class="stat-num">${statsR.m90}</span></div>
                                 <div class="stat-row"><span>80% - 89%:</span> <span class="stat-num">${statsR.m80}</span></div>
                                 <div class="stat-row"><span>70% - 79%:</span> <span class="stat-num">${statsR.m70}</span></div>
@@ -562,7 +620,9 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     let htmlTable = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>table { border-collapse: collapse; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; } th { background-color: #333333; color: #ffffff; padding: 6px; text-align: left; border: 1px solid #777777; font-weight: bold;} td { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; mso-number-format: "\\@"; }</style></head><body><table><tr><th>Original (Links):<br><span style="font-weight: normal; font-size: 10px;">${pathLeft}</span></th><th>Geändert (Rechts):<br><span style="font-weight: normal; font-size: 10px;">${pathRight}</span></th></tr>`;
 
                     diffData.forEach(block => {
-                        if (block.tag === 'equal') return;
+                        if (showOnlyDeltas && block.tag === 'equal') return;
+                        if (showOnlyEquals && block.tag !== 'equal') return;
+                        
                         let bgL = 'transparent', bgR = 'transparent', styleL = '', styleR = '';
                         if (block.tag === 'delete') { bgL = '#f8d7da'; styleL = 'background-color: #dc3545; color: white; font-weight: bold; text-decoration: line-through;'; } 
                         else if (block.tag === 'insert') { bgR = '#d4edda'; styleR = 'background-color: #28a745; color: white; font-weight: bold;'; } 
@@ -589,32 +649,25 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         const leftDiv = document.createElement('div');
                         leftDiv.id = `left-block-${block.id}`; leftDiv.className = `code-block tag-${block.tag}`;
                         leftDiv.innerHTML = block.left.length > 0 ? block.left.join('') : '\\n'.repeat(block.right.length);
-                        if(block.tag === 'insert') leftDiv.style.opacity = '0';
-                        if(showOnlyDeltas && block.tag === 'equal') leftDiv.style.display = 'none';
                         leftEditor.appendChild(leftDiv);
 
                         const rightDiv = document.createElement('div');
                         rightDiv.id = `right-block-${block.id}`; rightDiv.className = `code-block tag-${block.tag}`;
                         rightDiv.innerHTML = block.right.length > 0 ? block.right.join('') : '\\n'.repeat(block.left.length);
-                        if(block.tag === 'delete') rightDiv.style.opacity = '0';
-                        if(showOnlyDeltas && block.tag === 'equal') rightDiv.style.display = 'none';
                         rightEditor.appendChild(rightDiv);
                         
-                        if (block.tag !== 'equal') {
-                            const row = document.createElement('div');
-                            row.className = 'summary-row';
-                            row.onclick = () => stepDeltaToId(block.id);
-                            
-                            const sl = document.createElement('div'); sl.className = `summary-col left tag-${block.tag}`; sl.innerHTML = block.left.length > 0 ? block.left.join('') : '&nbsp;';
-                            const sr = document.createElement('div'); sr.className = `summary-col tag-${block.tag}`; sr.innerHTML = block.right.length > 0 ? block.right.join('') : '&nbsp;';
-                            row.appendChild(sl); row.appendChild(sr); summaryContent.appendChild(row);
-                        }
+                        const row = document.createElement('div');
+                        row.className = `summary-row tag-${block.tag}`;
+                        row.onclick = () => stepDeltaToId(block.id);
+                        
+                        const sl = document.createElement('div'); sl.className = `summary-col left tag-${block.tag}`; sl.innerHTML = block.left.length > 0 ? block.left.join('') : '&nbsp;';
+                        const sr = document.createElement('div'); sr.className = `summary-col tag-${block.tag}`; sr.innerHTML = block.right.length > 0 ? block.right.join('') : '&nbsp;';
+                        row.appendChild(sl); row.appendChild(sr); summaryContent.appendChild(row);
                     });
                     
-                    updateStatistics(); // v4.2 Getrennte Statistik
+                    updateStatistics();
                     initDeltas();
-                    clearSearch('left'); clearSearch('right');
-                    setTimeout(drawLines, 50);
+                    applyFilters(); 
                 }
 
                 function drawLines() {
@@ -623,10 +676,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     const leftScroll = leftEditor.scrollTop; const rightScroll = rightEditor.scrollTop;
 
                     diffData.forEach(block => {
-                        if (block.tag === 'equal') return;
+                        if (block.tag === 'equal' || showOnlyEquals) return;
+                        
                         const leftEl = document.getElementById(`left-block-${block.id}`);
                         const rightEl = document.getElementById(`right-block-${block.id}`);
-                        if (!leftEl || !rightEl) return;
+                        if (!leftEl || !rightEl || leftEl.style.display === 'none') return;
                         
                         const leftY = leftEl.offsetTop + (leftEl.offsetHeight / 2) - leftScroll;
                         const rightY = rightEl.offsetTop + (rightEl.offsetHeight / 2) - rightScroll;
@@ -652,23 +706,29 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     });
                 }
 
-                function extractLeftText() { let r=[]; diffData.forEach(b => { r.push(...b.raw_left); }); return r; }
-                function extractRightText() { let r=[]; diffData.forEach(b => { r.push(...b.raw_right); }); return r; }
-
-                async function triggerDiffUpdate(overrideL, overrideR) {
-                    let tL = overrideL || extractLeftText();
-                    let tR = overrideR || extractRightText();
+                // FIX v4.8: Immer das gesicherte globale State-Array "rawLeft" und "rawRight" ans Backend senden!
+                async function triggerDiffUpdate() {
+                    toggleLoading(true); 
                     
                     const isCsv = checkCsvMode();
                     const payload = {
-                        textLeft: tL, textRight: tR,
+                        textLeft: rawLeft, 
+                        textRight: rawRight,
                         isCsv: isCsv,
+                        delimiter: document.getElementById('csv-delimiter').value,
                         colLeft: document.getElementById('csv-col-left').value,
                         colRight: document.getElementById('csv-col-right').value
                     };
-                    const diffRes = await fetch('/api/diff', { method: 'POST', body: JSON.stringify(payload) });
-                    diffData = await diffRes.json();
-                    renderEditors();
+                    
+                    try {
+                        const diffRes = await fetch('/api/diff', { method: 'POST', body: JSON.stringify(payload) });
+                        diffData = await diffRes.json();
+                        renderEditors();
+                    } catch (e) {
+                        console.error("Fehler beim Diff:", e);
+                    } finally {
+                        toggleLoading(false); 
+                    }
                 }
 
                 async function loadFileFromDropdown(side) {
@@ -680,11 +740,14 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     const data = await response.json();
                     
                     document.getElementById(`path-${side}`).textContent = data.path;
-                    let tL = (side === 'left') ? data.content : extractLeftText();
-                    let tR = (side === 'right') ? data.content : extractRightText();
+                    if (side === 'left') rawLeft = data.content;
+                    if (side === 'right') rawRight = data.content;
                     
-                    checkCsvMode();
-                    triggerDiffUpdate(tL, tR);
+                    if (checkCsvMode()) {
+                        showWaitingPrompt();
+                    } else {
+                        triggerDiffUpdate();
+                    }
                 }
 
                 async function changeFile(side) {
@@ -695,15 +758,17 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         document.getElementById(`path-${side}`).textContent = data.path;
                         updateDropdown(side, data.siblings, data.path);
                         
-                        let tL = (side === 'left') ? data.content : extractLeftText();
-                        let tR = (side === 'right') ? data.content : extractRightText();
+                        if (side === 'left') rawLeft = data.content;
+                        if (side === 'right') rawRight = data.content;
                         
-                        checkCsvMode();
-                        triggerDiffUpdate(tL, tR);
+                        if (checkCsvMode()) {
+                            showWaitingPrompt();
+                        } else {
+                            triggerDiffUpdate();
+                        }
                     }
                 }
 
-                // --- Drag & Drop ---
                 function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
                 ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => { leftEditor.addEventListener(evt, preventDefaults, false); rightEditor.addEventListener(evt, preventDefaults, false); });
                 ['dragenter', 'dragover'].forEach(evt => { leftEditor.addEventListener(evt, () => leftEditor.classList.add('drag-over'), false); rightEditor.addEventListener(evt, () => rightEditor.classList.add('drag-over'), false); });
@@ -720,16 +785,18 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         document.getElementById(`path-${side}`).textContent = `[Drag & Drop] ${file.name}`;
                         document.getElementById(`dropdown-${side}`).innerHTML = '<option>-- Datei gezogen --</option>';
                         
-                        let tL = (side === 'left') ? content : extractLeftText();
-                        let tR = (side === 'right') ? content : extractRightText();
+                        if (side === 'left') rawLeft = content;
+                        if (side === 'right') rawRight = content;
                         
-                        checkCsvMode();
-                        triggerDiffUpdate(tL, tR);
+                        if (checkCsvMode()) {
+                            showWaitingPrompt();
+                        } else {
+                            triggerDiffUpdate();
+                        }
                     };
                     reader.readAsText(file);
                 }
 
-                // --- Suche ---
                 let searchState = { left: { hits: [], currentIndex: -1 }, right: { hits: [], currentIndex: -1 } };
                 function escapeRegExp(string) { return string.replace(/[.*+?^${}()|[\]\\\\]/g, '\\\\$&'); }
                 function clearSearch(side) {
@@ -773,7 +840,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     document.getElementById(`stats-${side}`).textContent = `${state.currentIndex + 1}/${state.hits.length}`;
                 }
 
-                // --- Events ---
                 window.addEventListener('wheel', (e) => {
                     if (e.ctrlKey) {
                         e.preventDefault(); 
@@ -806,8 +872,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 window.onload = () => { 
                     updateDropdown('left', filesLeft, document.getElementById('path-left').textContent);
                     updateDropdown('right', filesRight, document.getElementById('path-right').textContent);
-                    checkCsvMode();
-                    renderEditors(); 
+                    
+                    if (checkCsvMode()) {
+                        showWaitingPrompt();
+                    } else {
+                        triggerDiffUpdate(); 
+                    }
                 };
                 window.addEventListener('resize', drawLines);
             </script>
