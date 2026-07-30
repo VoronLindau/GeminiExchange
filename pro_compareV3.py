@@ -4,12 +4,16 @@ import os
 import json
 import html
 import csv
+import sys
 import tkinter as tk
 from tkinter import filedialog
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# --- DOORS Next 7.0.2 Fix: Feldgrößen-Limit aufheben für riesige Rich-Text-Zellen ---
+csv.field_size_limit(sys.maxsize)
+
 # --- App Konfiguration ---
-APP_VERSION = "v4.9"
+APP_VERSION = "v5.1"
 
 def waehle_datei_dialog(titel):
     root = tk.Tk()
@@ -25,22 +29,18 @@ def waehle_datei_dialog(titel):
     root.destroy() 
     return file_path
 
-# --- NEU v4.9: Intelligente Encoding-Erkennung für DOORS & Windows ---
 def read_file_safe(file_path):
-    # 1. utf-8-sig: Entfernt das unsichtbare BOM (Byte Order Mark) von DOORS Next
-    # 2. cp1252: Der Standard für deutsche Windows-Systeme (ANSI)
-    # 3. iso-8859-1: Internationaler Fallback
     encodings = ['utf-8-sig', 'cp1252', 'iso-8859-1']
-    
     for enc in encodings:
         try:
-            with open(file_path, 'r', encoding=enc) as f:
+            # WICHTIG für DOORS Next 7.0.2: newline='' verhindert, 
+            # dass Python die verschachtelten DNG-Zeilenumbrüche zerschießt!
+            with open(file_path, 'r', encoding=enc, newline='') as f:
                 return f.readlines()
         except UnicodeDecodeError:
-            continue # Wenn es crasht, probiere das nächste Format
+            continue
             
-    # Absoluter Notfall-Fallback
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(file_path, 'r', encoding='utf-8', errors='replace', newline='') as f:
         return f.readlines()
 
 def get_file_info(file_path):
@@ -85,22 +85,38 @@ def get_inline_diff(lines_left, lines_right):
         right_res.append(out_r)
     return left_res, right_res
 
-def parse_csv_line(line, delimiter=';'):
-    """CSV Parser mit einstellbarem Trennzeichen."""
-    # rstrip('\r\n') verhindert, dass leere Zeilenumbrüche am Ende die Spalten verrücken
-    try: return next(csv.reader([line.rstrip('\r\n')], delimiter=delimiter))
-    except: return [line.rstrip('\r\n')]
+def parse_full_csv(lines, delimiter):
+    """Parst die CSV komplett und korrekt (inklusive Zeilenumbrüchen innerhalb von DOORS-Zellen)."""
+    if delimiter == '\\t': delimiter = '\t'
+    reader = csv.reader(lines, delimiter=delimiter)
+    parsed_rows = []
+    prev_line_num = 0
+    
+    try:
+        for row in reader:
+            current_line_num = reader.line_num
+            # Greift exakt die Anzahl an Textzeilen ab, die zu diesem DOORS-Datensatz gehören
+            raw_lines = lines[prev_line_num : current_line_num]
+            raw_text = "".join(raw_lines)
+            parsed_rows.append( (raw_text, row) )
+            prev_line_num = current_line_num
+    except Exception as e:
+        print(f"CSV Warnung (Fallback greift): {e}")
+        pass
+        
+    return parsed_rows
 
 def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
     """Vergleicht CSV zeilenunabhängig basierend NUR auf den Werten der gewählten Spalten."""
-    parsed1 = [(line, parse_csv_line(line, delimiter)) for line in text1]
-    parsed2 = [(line, parse_csv_line(line, delimiter)) for line in text2]
+    parsed1 = parse_full_csv(text1, delimiter)
+    parsed2 = parse_full_csv(text2, delimiter)
         
     matched_indices_2 = set()
     diff_data = []
     block_id = 0
     matches = {} 
     
+    # 1. Exakte Schlüssel-Treffer finden
     exact_map_2 = {}
     for j, (raw2, cols2) in enumerate(parsed2):
         key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
@@ -116,6 +132,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
                     matched_indices_2.add(j)
                     break
                     
+    # 2. Fuzzy Durchlauf: Ähnliche Schlüssel finden (über 60%)
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches: continue
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
@@ -138,11 +155,13 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
+    # 3. HTML-Daten zusammenbauen
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches:
             j, key_ratio = matches[i]
             raw2, cols2 = parsed2[j]
             
+            # Wenn der Schlüssel zu 100% passt, ist es ein 'equal' - EGAL was im Rest der DOORS-Zeile steht!
             if key_ratio == 100.0:
                 tag = 'equal'
                 left_html = [html.escape(raw1)]
@@ -154,24 +173,28 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             diff_data.append({
                 'id': block_id, 'tag': tag,
                 'left': left_html, 'right': right_html,
-                'raw_left': [raw1], 'raw_right': [raw2],
+                'raw_left': raw1.splitlines(keepends=True) if raw1 else [],
+                'raw_right': raw2.splitlines(keepends=True) if raw2 else [],
                 'ratio': round(key_ratio, 1) 
             })
         else:
             diff_data.append({
                 'id': block_id, 'tag': 'delete',
                 'left': [html.escape(raw1)], 'right': [],
-                'raw_left': [raw1], 'raw_right': [],
+                'raw_left': raw1.splitlines(keepends=True) if raw1 else [],
+                'raw_right': [],
                 'ratio': 0
             })
         block_id += 1
         
+    # 4. Alle verbleibenden aus File 2 sind neue Zeilen
     for j, (raw2, cols2) in enumerate(parsed2):
         if j not in matched_indices_2:
             diff_data.append({
                 'id': block_id, 'tag': 'insert',
                 'left': [], 'right': [html.escape(raw2)],
-                'raw_left': [], 'raw_right': [raw2],
+                'raw_left': [], 
+                'raw_right': raw2.splitlines(keepends=True) if raw2 else [],
                 'ratio': 0
             })
             block_id += 1
@@ -268,7 +291,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 col_l = max(0, int(data.get('colLeft', 1)) - 1)
                 col_r = max(0, int(data.get('colRight', 1)) - 1)
                 delim = data.get('delimiter', ';')
-                if delim == '\\t': delim = '\t'
                 diff_data = berechne_csv_diff(data['textLeft'], data['textRight'], col_l, col_r, delim)
             else:
                 diff_data = berechne_diff_daten(data['textLeft'], data['textRight'])
