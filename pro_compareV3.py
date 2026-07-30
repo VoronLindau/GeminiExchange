@@ -13,7 +13,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.3"
+APP_VERSION = "v5.4"
 
 def waehle_datei_dialog(titel):
     root = tk.Tk()
@@ -139,7 +139,13 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
             if not key2: continue
             
-            ratio = difflib.SequenceMatcher(None, key1, key2).ratio() * 100
+            # --- TURBO-BOOST v5.4 ---
+            sm = difflib.SequenceMatcher(None, key1, key2)
+            # Brich sofort ab, wenn Längen so unterschiedlich sind, dass 60% unmöglich ist
+            if sm.real_quick_ratio() * 100 < 60.0: continue
+            if sm.quick_ratio() * 100 < 60.0: continue
+            
+            ratio = sm.ratio() * 100
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_j = j
@@ -159,7 +165,13 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
                 right_html = [html.escape(raw2)]
             else:
                 tag = 'replace'
-                left_html, right_html = get_inline_diff([raw1], [raw2])
+                # --- DOORS-NOTBREMSE v5.4 ---
+                # Verhindert Komplett-Absturz bei Mega-Strings (mehr als 5000 Zeichen)
+                if len(raw1) > 5000 or len(raw2) > 5000:
+                    left_html = [html.escape(raw1)]
+                    right_html = [html.escape(raw2)]
+                else:
+                    left_html, right_html = get_inline_diff([raw1], [raw2])
                 
             diff_data.append({
                 'id': block_id, 'tag': tag,
@@ -206,7 +218,13 @@ def berechne_diff_daten(text1, text2):
             str_left = "".join(block_left)
             str_right = "".join(block_right)
             ratio = round(difflib.SequenceMatcher(None, str_left, str_right).ratio() * 100, 1)
-            left_html, right_html = get_inline_diff(block_left, block_right)
+            
+            # --- NOTBREMSE auch hier ---
+            if len(str_left) > 5000 or len(str_right) > 5000:
+                left_html = [html.escape(l) for l in block_left]
+                right_html = [html.escape(l) for l in block_right]
+            else:
+                left_html, right_html = get_inline_diff(block_left, block_right)
         else:
             left_html = [html.escape(l) for l in block_left]
             right_html = [html.escape(l) for l in block_right]
@@ -341,8 +359,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 
                 #statistics-content { border-bottom: 2px solid #555; background: #252526; padding: 10px 15px; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px; }
                 .stat-header { font-weight: bold; color: #9cdcfe; margin-top: 5px; margin-bottom: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 1px;}
-                
-                /* NEU v5.3: Klickbare Statistiken */
                 .stat-row { display: flex; justify-content: space-between; padding-bottom: 2px;}
                 .clickable-stat { cursor: pointer; border-radius: 3px; padding: 2px 4px; margin: 0 -4px 2px -4px; transition: all 0.2s; border: 1px solid transparent; }
                 .clickable-stat:hover { background: #3c3c3c; border-color: #555; }
@@ -415,7 +431,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             <button id="toggle-deltas-btn" onclick="setFilter('deltas')" class="filter-btn">Deltas</button>
                             <button id="toggle-equals-btn" onclick="setFilter('equals')" class="filter-btn">Gleiche</button>
                         </div>
-                        <!-- NEU v5.3: Panel wieder öffnen Button -->
                         <button onclick="toggleSummary()" class="filter-btn" style="width: 90%; margin-top: 4px; background: #444; border: 1px solid #555;" title="Statistik & Übersicht ein/ausblenden">📊 Panel</button>
                         <div class="delta-nav-stats" id="delta-stats-display" style="margin-top: 5px;">0/0</div>
                     </div>
@@ -477,7 +492,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 
                 let deltaBlocks = [];
                 let currentDeltaIndex = -1;
-                let activeFilter = 'all'; // Filter State: 'all', 'deltas', 'equals', 'delete', 'insert', '100', '90', '80', '70', '60', 'low'
+                let activeFilter = 'all'; 
                 let currentZoom = 13; 
                 let isSummaryVisible = true;
                 
@@ -521,7 +536,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 }
 
                 function initDeltas() {
-                    // Sammelt nur Deltas, die auch durch den aktuellen Filter SICHTBAR sind!
                     deltaBlocks = diffData.filter(b => shouldShow(b.tag, b.ratio));
                     currentDeltaIndex = -1;
                     document.getElementById('delta-stats-display').textContent = deltaBlocks.length > 0 ? `0/${deltaBlocks.length}` : "0/0";
@@ -554,15 +568,14 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     document.getElementById('delta-stats-display').textContent = `${currentDeltaIndex + 1}/${deltaBlocks.length}`;
                 }
 
-                // --- NEU v5.3: Zentrales Filter-Management ---
                 function setFilter(filterType) {
                     if (activeFilter === filterType) {
-                        activeFilter = 'all'; // Klick auf aktiven Filter schaltet ihn aus
+                        activeFilter = 'all'; 
                     } else {
                         activeFilter = filterType;
                     }
-                    updateStatistics(); // UI-Highlight in der Statistik aktualisieren
-                    applyFilters();     // Blöcke ein/ausblenden
+                    updateStatistics(); 
+                    applyFilters();     
                 }
 
                 function shouldShow(tag, ratio) {
@@ -572,7 +585,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     if (activeFilter === 'delete') return tag === 'delete';
                     if (activeFilter === 'insert') return tag === 'insert';
 
-                    // Ab hier gelten Filter nur noch für Ähnlichkeits-Treffer
                     if (tag !== 'replace') return false;
 
                     if (activeFilter === '90') return ratio >= 90 && ratio < 100;
@@ -600,7 +612,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         row.style.display = shouldShow(tag, ratio) ? 'flex' : 'none';
                     });
 
-                    initDeltas(); // Up/Down Pfeile passen sich dem neuen Filter an!
+                    initDeltas();
 
                     if (document.getElementById('search-input-left').value) executeSearch('left');
                     if (document.getElementById('search-input-right').value) executeSearch('right');
@@ -687,7 +699,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     let htmlTable = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>table { border-collapse: collapse; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; } th { background-color: #333333; color: #ffffff; padding: 6px; text-align: left; border: 1px solid #777777; font-weight: bold;} td { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; mso-number-format: "\\@"; }</style></head><body><table><tr><th>Original (Links):<br><span style="font-weight: normal; font-size: 10px;">${pathLeft}</span></th><th>Übereinstimmung</th><th>Geändert (Rechts):<br><span style="font-weight: normal; font-size: 10px;">${pathRight}</span></th></tr>`;
 
                     diffData.forEach(block => {
-                        // Exportiert nur, was der Benutzer auch durch den Filter sieht
                         if (!shouldShow(block.tag, block.ratio)) return;
                         
                         let bgL = 'transparent', bgR = 'transparent', styleL = '', styleR = '';
@@ -760,7 +771,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     });
                     
                     updateStatistics();
-                    applyFilters(); // Hier wird automatisch initDeltas() mit aufgerufen
+                    applyFilters(); 
                 }
 
                 function drawLines() {
