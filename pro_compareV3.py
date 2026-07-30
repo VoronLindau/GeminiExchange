@@ -13,7 +13,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.1"
+APP_VERSION = "v5.3"
 
 def waehle_datei_dialog(titel):
     root = tk.Tk()
@@ -33,8 +33,6 @@ def read_file_safe(file_path):
     encodings = ['utf-8-sig', 'cp1252', 'iso-8859-1']
     for enc in encodings:
         try:
-            # WICHTIG für DOORS Next 7.0.2: newline='' verhindert, 
-            # dass Python die verschachtelten DNG-Zeilenumbrüche zerschießt!
             with open(file_path, 'r', encoding=enc, newline='') as f:
                 return f.readlines()
         except UnicodeDecodeError:
@@ -86,7 +84,6 @@ def get_inline_diff(lines_left, lines_right):
     return left_res, right_res
 
 def parse_full_csv(lines, delimiter):
-    """Parst die CSV komplett und korrekt (inklusive Zeilenumbrüchen innerhalb von DOORS-Zellen)."""
     if delimiter == '\\t': delimiter = '\t'
     reader = csv.reader(lines, delimiter=delimiter)
     parsed_rows = []
@@ -95,7 +92,6 @@ def parse_full_csv(lines, delimiter):
     try:
         for row in reader:
             current_line_num = reader.line_num
-            # Greift exakt die Anzahl an Textzeilen ab, die zu diesem DOORS-Datensatz gehören
             raw_lines = lines[prev_line_num : current_line_num]
             raw_text = "".join(raw_lines)
             parsed_rows.append( (raw_text, row) )
@@ -107,7 +103,6 @@ def parse_full_csv(lines, delimiter):
     return parsed_rows
 
 def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
-    """Vergleicht CSV zeilenunabhängig basierend NUR auf den Werten der gewählten Spalten."""
     parsed1 = parse_full_csv(text1, delimiter)
     parsed2 = parse_full_csv(text2, delimiter)
         
@@ -116,7 +111,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
     block_id = 0
     matches = {} 
     
-    # 1. Exakte Schlüssel-Treffer finden
     exact_map_2 = {}
     for j, (raw2, cols2) in enumerate(parsed2):
         key2 = cols2[col_r].strip() if col_r < len(cols2) else ""
@@ -132,7 +126,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
                     matched_indices_2.add(j)
                     break
                     
-    # 2. Fuzzy Durchlauf: Ähnliche Schlüssel finden (über 60%)
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches: continue
         key1 = cols1[col_l].strip() if col_l < len(cols1) else ""
@@ -155,13 +148,11 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
-    # 3. HTML-Daten zusammenbauen
     for i, (raw1, cols1) in enumerate(parsed1):
         if i in matches:
             j, key_ratio = matches[i]
             raw2, cols2 = parsed2[j]
             
-            # Wenn der Schlüssel zu 100% passt, ist es ein 'equal' - EGAL was im Rest der DOORS-Zeile steht!
             if key_ratio == 100.0:
                 tag = 'equal'
                 left_html = [html.escape(raw1)]
@@ -187,7 +178,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter):
             })
         block_id += 1
         
-    # 4. Alle verbleibenden aus File 2 sind neue Zeilen
     for j, (raw2, cols2) in enumerate(parsed2):
         if j not in matched_indices_2:
             diff_data.append({
@@ -291,6 +281,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 col_l = max(0, int(data.get('colLeft', 1)) - 1)
                 col_r = max(0, int(data.get('colRight', 1)) - 1)
                 delim = data.get('delimiter', ';')
+                if delim == '\\t': delim = '\t'
                 diff_data = berechne_csv_diff(data['textLeft'], data['textRight'], col_l, col_r, delim)
             else:
                 diff_data = berechne_diff_daten(data['textLeft'], data['textRight'])
@@ -345,19 +336,28 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .drag-over { background-color: rgba(0, 122, 204, 0.1) !important; box-shadow: inset 0 0 10px #007acc; }
                 #svg-container { width: 120px; flex-shrink: 0; position: relative; background: var(--bg-panel); border-left: 1px solid #444; border-right: 1px solid #444; cursor: col-resize; }
                 svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-                #summary-panel { width: 450px; flex-shrink: 0; background: #1e1e1e; border-left: 2px solid #555; display: flex; flex-direction: column; transition: width 0.3s; }
+                #summary-panel { width: 500px; flex-shrink: 0; background: #1e1e1e; border-left: 2px solid #555; display: flex; flex-direction: column; transition: width 0.3s; }
                 .summary-header { background: #333; padding: 8px; text-align: center; font-size: 12px; font-weight: bold; border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center;}
                 
                 #statistics-content { border-bottom: 2px solid #555; background: #252526; padding: 10px 15px; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px; }
                 .stat-header { font-weight: bold; color: #9cdcfe; margin-top: 5px; margin-bottom: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 1px;}
-                .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; padding-bottom: 2px;}
+                
+                /* NEU v5.3: Klickbare Statistiken */
+                .stat-row { display: flex; justify-content: space-between; padding-bottom: 2px;}
+                .clickable-stat { cursor: pointer; border-radius: 3px; padding: 2px 4px; margin: 0 -4px 2px -4px; transition: all 0.2s; border: 1px solid transparent; }
+                .clickable-stat:hover { background: #3c3c3c; border-color: #555; }
                 .stat-num { font-family: monospace; font-size: 13px; font-weight: bold; }
                 
                 #summary-content { flex: 1; overflow-y: auto; overflow-x: hidden; }
                 .summary-row { display: flex; border-bottom: 1px solid #333; cursor: pointer; transition: background-color 0.2s; }
                 .summary-row:hover { background-color: #2a2d2e; }
                 .summary-col { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px; font-family: 'Consolas', monospace; font-size: 11px; }
-                .summary-col.left { border-right: 1px solid #444; }
+                .summary-col.left { border-right: none; }
+                
+                .summary-col-mid { width: 50px; flex-shrink: 0; text-align: center; font-size: 11px; font-weight: bold; background: #252526; color: #fff; display: flex; align-items: center; justify-content: center; border-right: 1px solid #444; border-left: 1px solid #444; }
+                .tag-equal .summary-col-mid { color: #28a745; }
+                .tag-replace .summary-col-mid { color: #007bff; }
+                
                 .code-block { padding: 2px 10px; white-space: pre; border-left: 3px solid transparent; border-right: 3px solid transparent; transition: background-color 0.3s; }
                 
                 .tag-equal { color: #d4d4d4; }
@@ -412,10 +412,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             <button onclick="stepDelta(1)">▼</button>
                         </div>
                         <div style="display: flex; gap: 4px; width: 90%; margin-top: 2px;">
-                            <button id="toggle-deltas-btn" onclick="toggleDeltas()" class="filter-btn">Deltas</button>
-                            <button id="toggle-equals-btn" onclick="toggleEquals()" class="filter-btn">Gleiche</button>
+                            <button id="toggle-deltas-btn" onclick="setFilter('deltas')" class="filter-btn">Deltas</button>
+                            <button id="toggle-equals-btn" onclick="setFilter('equals')" class="filter-btn">Gleiche</button>
                         </div>
-                        <div class="delta-nav-stats" id="delta-stats-display">0/0</div>
+                        <!-- NEU v5.3: Panel wieder öffnen Button -->
+                        <button onclick="toggleSummary()" class="filter-btn" style="width: 90%; margin-top: 4px; background: #444; border: 1px solid #555;" title="Statistik & Übersicht ein/ausblenden">📊 Panel</button>
+                        <div class="delta-nav-stats" id="delta-stats-display" style="margin-top: 5px;">0/0</div>
                     </div>
                     
                     <div class="pane-header right">
@@ -458,7 +460,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         <span style="flex: 1; text-align: left; margin-top: 3px;">ÜBERSICHT & STATISTIK</span>
                         <div style="display: flex; gap: 10px;">
                             <button class="btn-excel" onclick="exportExcel()">📥 EXCEL</button>
-                            <button onclick="toggleSummary()" style="background:none; border:none; color:#aaa; cursor:pointer; font-size: 14px;">✖</button>
+                            <button onclick="toggleSummary()" style="background:none; border:none; color:#aaa; cursor:pointer; font-size: 14px;" title="Panel schließen">✖</button>
                         </div>
                     </div>
                     <div id="statistics-content"></div> 
@@ -475,8 +477,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 
                 let deltaBlocks = [];
                 let currentDeltaIndex = -1;
-                let showOnlyDeltas = false;
-                let showOnlyEquals = false;
+                let activeFilter = 'all'; // Filter State: 'all', 'deltas', 'equals', 'delete', 'insert', '100', '90', '80', '70', '60', 'low'
                 let currentZoom = 13; 
                 let isSummaryVisible = true;
                 
@@ -520,7 +521,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 }
 
                 function initDeltas() {
-                    deltaBlocks = diffData.filter(b => b.tag !== 'equal');
+                    // Sammelt nur Deltas, die auch durch den aktuellen Filter SICHTBAR sind!
+                    deltaBlocks = diffData.filter(b => shouldShow(b.tag, b.ratio));
                     currentDeltaIndex = -1;
                     document.getElementById('delta-stats-display').textContent = deltaBlocks.length > 0 ? `0/${deltaBlocks.length}` : "0/0";
                 }
@@ -552,33 +554,53 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     document.getElementById('delta-stats-display').textContent = `${currentDeltaIndex + 1}/${deltaBlocks.length}`;
                 }
 
-                function toggleDeltas() {
-                    showOnlyDeltas = !showOnlyDeltas;
-                    if (showOnlyDeltas) showOnlyEquals = false; 
-                    applyFilters();
+                // --- NEU v5.3: Zentrales Filter-Management ---
+                function setFilter(filterType) {
+                    if (activeFilter === filterType) {
+                        activeFilter = 'all'; // Klick auf aktiven Filter schaltet ihn aus
+                    } else {
+                        activeFilter = filterType;
+                    }
+                    updateStatistics(); // UI-Highlight in der Statistik aktualisieren
+                    applyFilters();     // Blöcke ein/ausblenden
                 }
 
-                function toggleEquals() {
-                    showOnlyEquals = !showOnlyEquals;
-                    if (showOnlyEquals) showOnlyDeltas = false; 
-                    applyFilters();
+                function shouldShow(tag, ratio) {
+                    if (activeFilter === 'all') return true;
+                    if (activeFilter === 'deltas') return tag !== 'equal';
+                    if (activeFilter === 'equals' || activeFilter === '100') return tag === 'equal';
+                    if (activeFilter === 'delete') return tag === 'delete';
+                    if (activeFilter === 'insert') return tag === 'insert';
+
+                    // Ab hier gelten Filter nur noch für Ähnlichkeits-Treffer
+                    if (tag !== 'replace') return false;
+
+                    if (activeFilter === '90') return ratio >= 90 && ratio < 100;
+                    if (activeFilter === '80') return ratio >= 80 && ratio < 90;
+                    if (activeFilter === '70') return ratio >= 70 && ratio < 80;
+                    if (activeFilter === '60') return ratio >= 60 && ratio < 70;
+                    if (activeFilter === 'low') return ratio < 60;
+
+                    return true;
                 }
 
                 function applyFilters() {
-                    document.getElementById('toggle-deltas-btn').classList.toggle('toggle-active', showOnlyDeltas);
-                    document.getElementById('toggle-equals-btn').classList.toggle('toggle-active', showOnlyEquals);
+                    document.getElementById('toggle-deltas-btn').classList.toggle('toggle-active', activeFilter === 'deltas');
+                    document.getElementById('toggle-equals-btn').classList.toggle('toggle-active', activeFilter === 'equals');
 
                     document.querySelectorAll('.code-block').forEach(el => {
-                        el.style.display = 'block';
-                        if (showOnlyDeltas && el.classList.contains('tag-equal')) el.style.display = 'none';
-                        if (showOnlyEquals && !el.classList.contains('tag-equal')) el.style.display = 'none';
+                        let tag = el.getAttribute('data-tag');
+                        let ratio = parseFloat(el.getAttribute('data-ratio'));
+                        el.style.display = shouldShow(tag, ratio) ? 'block' : 'none';
                     });
 
                     document.querySelectorAll('.summary-row').forEach(row => {
-                        row.style.display = 'flex';
-                        if (showOnlyDeltas && row.classList.contains('tag-equal')) row.style.display = 'none';
-                        if (showOnlyEquals && !row.classList.contains('tag-equal')) row.style.display = 'none';
+                        let tag = row.getAttribute('data-tag');
+                        let ratio = parseFloat(row.getAttribute('data-ratio'));
+                        row.style.display = shouldShow(tag, ratio) ? 'flex' : 'none';
                     });
+
+                    initDeltas(); // Up/Down Pfeile passen sich dem neuen Filter an!
 
                     if (document.getElementById('search-input-left').value) executeSearch('left');
                     if (document.getElementById('search-input-right').value) executeSearch('right');
@@ -588,9 +610,18 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 function toggleSummary() {
                     isSummaryVisible = !isSummaryVisible;
                     const panel = document.getElementById('summary-panel');
-                    panel.style.width = isSummaryVisible ? '450px' : '0px';
+                    panel.style.width = isSummaryVisible ? '500px' : '0px';
                     panel.style.borderLeft = isSummaryVisible ? '2px solid #555' : 'none';
                     setTimeout(drawLines, 300);
+                }
+
+                function createStatRow(label, count, filterKey, color) {
+                    let isActive = (activeFilter === filterKey);
+                    let activeStyle = isActive ? 'background: #007acc; color: white; border-color: #4dc3ff;' : '';
+                    return `<div class="stat-row clickable-stat" style="${activeStyle}" onclick="setFilter('${filterKey}')" title="Klicken, um diesen Datensatz zu filtern">
+                                <span>${label}</span>
+                                <span class="stat-num" style="color:${isActive ? 'white' : color}">${count}</span>
+                            </div>`;
                 }
 
                 function updateStatistics() {
@@ -623,25 +654,27 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         <div style="display: flex; gap: 15px;">
                             <div style="flex: 1; border-right: 1px solid #444; padding-right: 15px;">
                                 <div class="stat-header">LINKS (Original)</div>
-                                <div class="stat-row"><span>Gesamtzeilen:</span> <span class="stat-num">${statsL.total}</span></div>
-                                <div class="stat-row"><span>Ohne Partner:</span> <span class="stat-num" style="color:#dc3545">${statsL.unmatch}</span></div>
-                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% (Spalte gleich):</span> <span class="stat-num">${statsL.exakt}</span></div>
-                                <div class="stat-row"><span>90% - 99%:</span> <span class="stat-num">${statsL.m90}</span></div>
-                                <div class="stat-row"><span>80% - 89%:</span> <span class="stat-num">${statsL.m80}</span></div>
-                                <div class="stat-row"><span>70% - 79%:</span> <span class="stat-num">${statsL.m70}</span></div>
-                                <div class="stat-row"><span>60% - 69%:</span> <span class="stat-num">${statsL.m60}</span></div>
-                                <div class="stat-row"><span>< 60%:</span> <span class="stat-num">${statsL.mLow}</span></div>
+                                <div class="stat-row" style="margin-bottom:6px;"><span>Gesamtzeilen:</span> <span class="stat-num">${statsL.total}</span></div>
+                                ${createStatRow('Ohne Partner:', statsL.unmatch, 'delete', '#dc3545')}
+                                <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
+                                ${createStatRow('100% (Spalte gleich):', statsL.exakt, '100', '#d4d4d4')}
+                                ${createStatRow('90% - 99%:', statsL.m90, '90', '#d4d4d4')}
+                                ${createStatRow('80% - 89%:', statsL.m80, '80', '#d4d4d4')}
+                                ${createStatRow('70% - 79%:', statsL.m70, '70', '#d4d4d4')}
+                                ${createStatRow('60% - 69%:', statsL.m60, '60', '#d4d4d4')}
+                                ${createStatRow('< 60%:', statsL.mLow, 'low', '#d4d4d4')}
                             </div>
                             <div style="flex: 1;">
                                 <div class="stat-header">RECHTS (Geändert)</div>
-                                <div class="stat-row"><span>Gesamtzeilen:</span> <span class="stat-num">${statsR.total}</span></div>
-                                <div class="stat-row"><span>Ohne Partner:</span> <span class="stat-num" style="color:#28a745">${statsR.unmatch}</span></div>
-                                <div class="stat-row" style="margin-top: 8px; border-top: 1px dotted #444; padding-top: 4px;"><span>100% (Spalte gleich):</span> <span class="stat-num">${statsR.exakt}</span></div>
-                                <div class="stat-row"><span>90% - 99%:</span> <span class="stat-num">${statsR.m90}</span></div>
-                                <div class="stat-row"><span>80% - 89%:</span> <span class="stat-num">${statsR.m80}</span></div>
-                                <div class="stat-row"><span>70% - 79%:</span> <span class="stat-num">${statsR.m70}</span></div>
-                                <div class="stat-row"><span>60% - 69%:</span> <span class="stat-num">${statsR.m60}</span></div>
-                                <div class="stat-row"><span>< 60%:</span> <span class="stat-num">${statsR.mLow}</span></div>
+                                <div class="stat-row" style="margin-bottom:6px;"><span>Gesamtzeilen:</span> <span class="stat-num">${statsR.total}</span></div>
+                                ${createStatRow('Ohne Partner:', statsR.unmatch, 'insert', '#28a745')}
+                                <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
+                                ${createStatRow('100% (Spalte gleich):', statsR.exakt, '100', '#d4d4d4')}
+                                ${createStatRow('90% - 99%:', statsR.m90, '90', '#d4d4d4')}
+                                ${createStatRow('80% - 89%:', statsR.m80, '80', '#d4d4d4')}
+                                ${createStatRow('70% - 79%:', statsR.m70, '70', '#d4d4d4')}
+                                ${createStatRow('60% - 69%:', statsR.m60, '60', '#d4d4d4')}
+                                ${createStatRow('< 60%:', statsR.mLow, 'low', '#d4d4d4')}
                             </div>
                         </div>
                     `;
@@ -651,20 +684,37 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 function exportExcel() {
                     const pathLeft = document.getElementById('path-left').textContent;
                     const pathRight = document.getElementById('path-right').textContent;
-                    let htmlTable = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>table { border-collapse: collapse; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; } th { background-color: #333333; color: #ffffff; padding: 6px; text-align: left; border: 1px solid #777777; font-weight: bold;} td { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; mso-number-format: "\\@"; }</style></head><body><table><tr><th>Original (Links):<br><span style="font-weight: normal; font-size: 10px;">${pathLeft}</span></th><th>Geändert (Rechts):<br><span style="font-weight: normal; font-size: 10px;">${pathRight}</span></th></tr>`;
+                    let htmlTable = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>table { border-collapse: collapse; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; } th { background-color: #333333; color: #ffffff; padding: 6px; text-align: left; border: 1px solid #777777; font-weight: bold;} td { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; mso-number-format: "\\@"; }</style></head><body><table><tr><th>Original (Links):<br><span style="font-weight: normal; font-size: 10px;">${pathLeft}</span></th><th>Übereinstimmung</th><th>Geändert (Rechts):<br><span style="font-weight: normal; font-size: 10px;">${pathRight}</span></th></tr>`;
 
                     diffData.forEach(block => {
-                        if (showOnlyDeltas && block.tag === 'equal') return;
-                        if (showOnlyEquals && block.tag !== 'equal') return;
+                        // Exportiert nur, was der Benutzer auch durch den Filter sieht
+                        if (!shouldShow(block.tag, block.ratio)) return;
                         
                         let bgL = 'transparent', bgR = 'transparent', styleL = '', styleR = '';
-                        if (block.tag === 'delete') { bgL = '#f8d7da'; styleL = 'background-color: #dc3545; color: white; font-weight: bold; text-decoration: line-through;'; } 
-                        else if (block.tag === 'insert') { bgR = '#d4edda'; styleR = 'background-color: #28a745; color: white; font-weight: bold;'; } 
-                        else if (block.tag === 'replace') { bgL = bgR = '#cce5ff'; styleL = styleR = 'background-color: #007bff; color: white; font-weight: bold;'; }
+                        let ratioTxt = '-';
+                        
+                        if (block.tag === 'delete') { 
+                            bgL = '#f8d7da'; styleL = 'background-color: #dc3545; color: white; font-weight: bold; text-decoration: line-through;'; 
+                        } 
+                        else if (block.tag === 'insert') { 
+                            bgR = '#d4edda'; styleR = 'background-color: #28a745; color: white; font-weight: bold;'; 
+                        } 
+                        else if (block.tag === 'replace') { 
+                            bgL = bgR = '#cce5ff'; styleL = styleR = 'background-color: #007bff; color: white; font-weight: bold;'; 
+                            ratioTxt = block.ratio + '%';
+                        }
+                        else if (block.tag === 'equal') {
+                            ratioTxt = '100%';
+                        }
 
-                        let txtL = block.left.join('').replace(/\\n/g, '<br>').replace(/<span class='char-diff'>/g, `<span style="${styleL}">`);
-                        let txtR = block.right.join('').replace(/\\n/g, '<br>').replace(/<span class='char-diff'>/g, `<span style="${styleR}">`);
-                        htmlTable += `<tr><td style="background-color: ${bgL};">${txtL || '&nbsp;'}</td><td style="background-color: ${bgR};">${txtR || '&nbsp;'}</td></tr>`;
+                        let txtL = block.left.join('').replace(/\\r?\\n/g, '<br style="mso-data-placement:same-cell;">').replace(/<span class='char-diff'>/g, `<span style="${styleL}">`);
+                        let txtR = block.right.join('').replace(/\\r?\\n/g, '<br style="mso-data-placement:same-cell;">').replace(/<span class='char-diff'>/g, `<span style="${styleR}">`);
+                        
+                        htmlTable += `<tr>
+                            <td style="background-color: ${bgL};">${txtL || '&nbsp;'}</td>
+                            <td style="text-align: center; font-weight: bold; vertical-align: middle;">${ratioTxt}</td>
+                            <td style="background-color: ${bgR};">${txtR || '&nbsp;'}</td>
+                        </tr>`;
                     });
                     htmlTable += `</table></body></html>`;
                     const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' });
@@ -682,26 +732,35 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     diffData.forEach(block => {
                         const leftDiv = document.createElement('div');
                         leftDiv.id = `left-block-${block.id}`; leftDiv.className = `code-block tag-${block.tag}`;
+                        leftDiv.setAttribute('data-tag', block.tag); leftDiv.setAttribute('data-ratio', block.ratio);
                         leftDiv.innerHTML = block.left.length > 0 ? block.left.join('') : '\\n'.repeat(block.right.length);
                         leftEditor.appendChild(leftDiv);
 
                         const rightDiv = document.createElement('div');
                         rightDiv.id = `right-block-${block.id}`; rightDiv.className = `code-block tag-${block.tag}`;
+                        rightDiv.setAttribute('data-tag', block.tag); rightDiv.setAttribute('data-ratio', block.ratio);
                         rightDiv.innerHTML = block.right.length > 0 ? block.right.join('') : '\\n'.repeat(block.left.length);
                         rightEditor.appendChild(rightDiv);
                         
                         const row = document.createElement('div');
                         row.className = `summary-row tag-${block.tag}`;
+                        row.setAttribute('data-tag', block.tag); row.setAttribute('data-ratio', block.ratio);
                         row.onclick = () => stepDeltaToId(block.id);
                         
-                        const sl = document.createElement('div'); sl.className = `summary-col left tag-${block.tag}`; sl.innerHTML = block.left.length > 0 ? block.left.join('') : '&nbsp;';
-                        const sr = document.createElement('div'); sr.className = `summary-col tag-${block.tag}`; sr.innerHTML = block.right.length > 0 ? block.right.join('') : '&nbsp;';
-                        row.appendChild(sl); row.appendChild(sr); summaryContent.appendChild(row);
+                        const sl = document.createElement('div'); sl.className = `summary-col left`; sl.innerHTML = block.left.length > 0 ? block.left.join('') : '&nbsp;';
+                        
+                        const smid = document.createElement('div'); smid.className = `summary-col-mid`; 
+                        if (block.tag === 'equal') smid.textContent = '100%';
+                        else if (block.tag === 'replace') smid.textContent = block.ratio + '%';
+                        else smid.textContent = '-';
+                        
+                        const sr = document.createElement('div'); sr.className = `summary-col`; sr.innerHTML = block.right.length > 0 ? block.right.join('') : '&nbsp;';
+                        
+                        row.appendChild(sl); row.appendChild(smid); row.appendChild(sr); summaryContent.appendChild(row);
                     });
                     
                     updateStatistics();
-                    initDeltas();
-                    applyFilters(); 
+                    applyFilters(); // Hier wird automatisch initDeltas() mit aufgerufen
                 }
 
                 function drawLines() {
@@ -710,7 +769,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     const leftScroll = leftEditor.scrollTop; const rightScroll = rightEditor.scrollTop;
 
                     diffData.forEach(block => {
-                        if (block.tag === 'equal' || showOnlyEquals) return;
+                        if (!shouldShow(block.tag, block.ratio) || block.tag === 'equal') return;
                         
                         const leftEl = document.getElementById(`left-block-${block.id}`);
                         const rightEl = document.getElementById(`right-block-${block.id}`);
