@@ -1,0 +1,60 @@
+                function drawLines() {
+                    try {
+                        const svg = document.getElementById('lines-svg');
+                        const leftEditor = document.getElementById('left-editor');
+                        const rightEditor = document.getElementById('right-editor');
+                        const container = document.getElementById('svg-container');
+                        
+                        if (!svg || !leftEditor || !rightEditor || !container) return;
+                        
+                        // 1. Sicherer Weg für alle Browser, um alte Linien zu löschen
+                        while (svg.firstChild) {
+                            svg.removeChild(svg.firstChild);
+                        }
+                        
+                        // 2. Abwärtskompatible Checkbox-Prüfung (ohne '?.' Zeichen!)
+                        const chkMaster = document.getElementById('chk-show-lines');
+                        const chkEqual = document.getElementById('chk-equal-lines');
+                        const showLines = chkMaster ? chkMaster.checked : true;
+                        const showEqual = chkEqual ? chkEqual.checked : true;
+
+                        if (!showLines) return;
+                        
+                        const svgWidth = container.clientWidth || 100;
+                        const lScroll = leftEditor.scrollTop;
+                        const rScroll = rightEditor.scrollTop;
+
+                        diffData.forEach(block => {
+                            if (block.tag === 'equal' && !showEqual) return;
+                            
+                            const lEl = document.getElementById('l-' + block.id);
+                            const rEl = document.getElementById('r-' + block.id);
+                            
+                            // Ignoriere unsichtbare Blöcke
+                            if (!lEl || !rEl || lEl.offsetParent === null || rEl.offsetParent === null) return;
+                            
+                            // Pinnt die SVG Linie direkt auf die Höhe der [Kapitel] Überschrift
+                            const lY = lEl.offsetTop + 18 - lScroll;
+                            const rY = rEl.offsetTop + 18 - rScroll;
+                            
+                            let color = '#007bff';
+                            let opacity = '0.8';
+                            let strokeWidth = '2.5';
+                            
+                            if (block.tag === 'insert') { color = '#28a745'; }
+                            else if (block.tag === 'delete') { color = '#dc3545'; }
+                            else if (block.tag === 'equal') { color = '#666666'; opacity = '0.3'; strokeWidth = '1.5'; }
+
+                            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                            path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
+                            path.setAttribute('fill', 'none'); 
+                            path.setAttribute('stroke', color);
+                            path.setAttribute('stroke-width', strokeWidth); 
+                            path.setAttribute('opacity', opacity);
+                            svg.appendChild(path);
+                        });
+                    } catch(e) {
+                        console.error("Fehler beim Zeichnen der Linien:", e);
+                    }
+               
+}
