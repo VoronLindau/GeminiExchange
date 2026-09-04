@@ -3,7 +3,6 @@ import re
 import json
 import zipfile
 import hashlib
-import xml.etree.ElementTree as ET
 import difflib
 import tkinter as tk
 from tkinter import filedialog
@@ -12,9 +11,10 @@ import webbrowser
 import threading
 import html
 import tempfile
+import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v10.10 (Bulletproof Data Edition)"
+APP_VERSION = "v20.0 (Media-Diff & Word Live-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -24,39 +24,6 @@ DISPLAY_NAME_RIGHT = ""
 # ==========================================
 # MODUS 1: MICROSOFT WORD COM-STEUERUNG
 # ==========================================
-def try_word_fusion(file_left, file_right):
-    if not file_left or not file_right or not os.path.exists(file_left) or not os.path.exists(file_right):
-        return False
-    try:
-        import win32com.client
-    except ImportError:
-        return False
-    try:
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        word.DisplayAlerts = False
-        doc1 = word.Documents.Open(os.path.abspath(file_left))
-        doc2 = word.Documents.Open(os.path.abspath(file_right))
-        temp_dir = tempfile.gettempdir()
-        output_file = os.path.join(temp_dir, "FUSIONIERT_Vergleich.docx").replace('\\', '/')
-        word.Application.CompareDocuments(
-            doc1, doc2, 2, 1, True, True, True, True, True, True, True, True, True, True
-        )
-        fused_doc = word.ActiveDocument
-        fused_doc.SaveAs(os.path.abspath(output_file))
-        fused_doc.Close()
-        doc1.Close(False)
-        doc2.Close(False)
-        word.Quit()
-        os.startfile(os.path.abspath(output_file))
-        return True
-    except Exception:
-        try:
-            word.Quit()
-        except:
-            pass
-        return False
-
 def jump_to_word_page(file_path, page_num):
     if not file_path or not os.path.exists(file_path):
         return False
@@ -76,132 +43,61 @@ def jump_to_word_page(file_path, page_num):
             
         doc.Activate()
         word.Activate()
+        # wdGoToPage = 1, wdGoToAbsolute = 1
         word.Selection.GoTo(1, 1, int(page_num))
         return True
     except Exception as e:
-        print(f"Fehler beim Word-Sprung: {e}")
-        return False
-
-def generate_word_report():
-    if not START_FILE_LEFT or not START_FILE_RIGHT:
-        return False
-        
-    info_l = get_file_info(START_FILE_LEFT)
-    info_r = get_file_info(START_FILE_RIGHT)
-    diff_data = berechne_diff_daten(info_l['content'], info_r['content'])
-    
-    eq = ins = rep = dele = 0
-    details = []
-    
-    for b in diff_data:
-        if b.get('req_id') and b['req_id'] != 'HEADER':
-            if b['tag'] == 'equal': eq += 1
-            elif b['tag'] == 'insert': ins += 1; details.append(b)
-            elif b['tag'] == 'replace': rep += 1; details.append(b)
-            elif b['tag'] == 'delete': dele += 1; details.append(b)
-            
-    try:
-        import win32com.client
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = True
-        doc = word.Documents.Add()
-        sel = word.Selection
-        
-        sel.Font.Size = 16
-        sel.Font.Bold = True
-        sel.TypeText("Delta-Protokoll: Requirements\n\n")
-        
-        sel.Font.Size = 11
-        sel.Font.Bold = False
-        sel.TypeText(f"Original-Datei: {DISPLAY_NAME_LEFT}\n")
-        sel.TypeText(f"Geänderte Datei: {DISPLAY_NAME_RIGHT}\n\n")
-        
-        sel.Font.Bold = True
-        sel.TypeText("Management Summary (Statistik):\n")
-        sel.Font.Bold = False
-        sel.TypeText(f"• Unveränderte Anforderungen: {eq}\n")
-        sel.TypeText(f"• Geänderte Anforderungen (Text/Bild): {rep}\n")
-        sel.TypeText(f"• Neu hinzugefügte Anforderungen: {ins}\n")
-        sel.TypeText(f"• Gelöschte Anforderungen: {dele}\n\n")
-        
-        sel.Font.Bold = True
-        sel.TypeText("Detailliertes Änderungsprotokoll:\n\n")
-        sel.Font.Bold = False
-        
-        if not details:
-            sel.TypeText("Es wurden keine Änderungen gefunden.\n")
-        
-        for i, b in enumerate(details, 1):
-            tag_de = {"insert": "NEU", "replace": "GEÄNDERT", "delete": "GELÖSCHT"}[b['tag']]
-            sel.Font.Bold = True
-            sel.TypeText(f"{i}. [{tag_de}] ID: {b['req_id']}\n")
-            sel.Font.Bold = False
-            
-            left_text = "".join(b['left'])
-            right_text = "".join(b['right'])
-            if "[BILD:" in left_text or "[BILD:" in right_text:
-                sel.TypeText("   -> Achtung: Diese Anforderung enthält Grafik-/Medienänderungen.\n")
-            else:
-                sel.TypeText("   -> Reine Textänderung.\n")
-            sel.TypeText("\n")
-            
-        return True
-    except Exception as e:
-        print(f"Fehler bei Report-Generierung: {e}")
         return False
 
 # ==========================================
-# MODUS 2: PURE PYTHON / ID-PARSER
+# MODUS 2: PURE PYTHON XML PARSER
 # ==========================================
 def get_docx_data(file_path):
     content = []
     objects = {}
-    page_count = 1  
+    page_count = [1] 
     
     try:
         with zipfile.ZipFile(file_path, 'r') as z:
             rels = {}
             if 'word/_rels/document.xml.rels' in z.namelist():
+                import xml.etree.ElementTree as ET
                 rels_root = ET.fromstring(z.read('word/_rels/document.xml.rels'))
                 for rel in rels_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                    r_id = rel.get('Id')
                     target = rel.get('Target')
                     if target:
-                        if not target.startswith('word/'):
-                            target = 'word/' + target
-                        rels[r_id] = target
+                        if not target.startswith('word/'): target = 'word/' + target
+                        rels[rel.get('Id')] = target
 
             for name in z.namelist():
                 if name.startswith(('word/media/', 'word/embeddings/')):
                     objects[name] = hashlib.sha256(z.read(name)).hexdigest()
 
             if 'word/document.xml' in z.namelist():
+                import xml.etree.ElementTree as ET
                 doc_root = ET.fromstring(z.read('word/document.xml'))
-                for p in doc_root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
+                
+                for p in doc_root.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
                     para_text = ""
                     for node in p.iter():
                         if node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}lastRenderedPageBreak' or \
                            (node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br' and node.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type') == 'page'):
-                            page_count += 1
-                            para_text += f"\n[SEITENUMBRUCH: {page_count}]\n"
-                            
-                        elif node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t':
-                            if node.text:
-                                para_text += node.text
-                        elif node.tag == '{http://schemas.openxmlformats.org/drawingml/2006/main}blip':
-                            r_id = node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                            page_count[0] += 1
+                            para_text += f"\n[SEITENUMBRUCH: {page_count[0]}]\n"
+                        elif node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t' and node.text:
+                            para_text += node.text
+                        elif node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tab':
+                            para_text += " " 
+                        elif node.tag in ('{http://schemas.openxmlformats.org/drawingml/2006/main}blip', '{urn:schemas-microsoft-com:vml}imagedata'):
+                            r_id = node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed') or node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
                             if r_id and r_id in rels:
                                 img_path = rels[r_id]
                                 img_hash = objects.get(img_path, "NO_HASH")
                                 para_text += f"\n[BILD: {img_path} | HASH: {img_hash}]\n"
-                        elif node.tag == '{urn:schemas-microsoft-com:vml}imagedata':
-                            r_id = node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-                            if r_id and r_id in rels:
-                                img_path = rels[r_id]
-                                img_hash = objects.get(img_path, "NO_HASH")
-                                para_text += f"\n[BILD: {img_path} | HASH: {img_hash}]\n"
-                    if para_text.strip():
-                        content.append(para_text + "\n")
+                    
+                    txt = para_text.strip()
+                    if txt: content.append(txt)
+                
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
     return content, objects
@@ -214,113 +110,175 @@ def get_file_info(file_path):
         content, objects = get_docx_data(file_path)
     else:
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.readlines()
+            content = [l.strip() for l in f.readlines() if l.strip()]
         objects = {}
     return {"path": file_path.replace('\\', '/'), "content": content, "objects": objects}
 
-def parse_requirements(lines):
-    reqs = []
-    current_id = None
-    current_content = []
-    
-    for line in lines:
-        # Optimierter Regex: Erkennt nun auch Kapitel-Nummerierungen wie "3.1" als Block-Anker
-        match = re.search(r'(?:^|\n)\s*(ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|(?:\d+\.){1,}\d+|\.\d+(?:\.\d+)+)', line, re.IGNORECASE)
-        if match:
-            if current_content:
-                reqs.append({'id': current_id or 'HEADER', 'content': current_content})
-            current_id = match.group(1).strip()
-            current_content = [line]
-        else:
-            current_content.append(line)
+def heal_text(lines):
+    res = []
+    last_major = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
             
-    if current_content:
-        reqs.append({'id': current_id or 'HEADER', 'content': current_content})
+        m = re.match(r'^(\d+)(?:\.|$)', line)
+        if m: last_major = m.group(1)
         
-    return reqs
+        if re.match(r'^\d+\.?$', line) and i+1 < len(lines) and re.match(r'^\.\d+', lines[i+1].strip()):
+            merged = line + lines[i+1].strip()
+            res.append(merged)
+            m2 = re.match(r'^(\d+)', merged)
+            if m2: last_major = m2.group(1)
+            i += 2
+            continue
+            
+        if re.match(r'^\.\d+', line) and last_major:
+            res.append(last_major + line)
+            i += 1
+            continue
+            
+        res.append(line)
+        i += 1
+    return res
 
-def berechne_diff_daten(text1, text2):
-    reqs_left = parse_requirements(text1)
-    reqs_right = parse_requirements(text2)
-    
-    has_ids = any(r['id'] != 'HEADER' for r in reqs_left + reqs_right)
-    
-    if not has_ids:
-        sm = difflib.SequenceMatcher(None, text1, text2)
-        diff_data = []
-        block_id = 0
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            diff_data.append({
-                'id': block_id,
-                'tag': tag,
-                'left': [html.escape(l) for l in text1[i1:i2]],
-                'right': [html.escape(l) for l in text2[j1:j2]]
-            })
-            block_id += 1
-        return diff_data
+def extract_id(text):
+    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+\.\d+(?:\.\d+)*[a-zA-Z]?)(?:\s|$)', text, re.IGNORECASE)
+    if m: return m.group(0).strip()
+    return None
 
-    left_ids = [r['id'] for r in reqs_left]
-    right_ids = [r['id'] for r in reqs_right]
-    left_map = {r['id']: r['content'] for r in reqs_left}
-    right_map = {r['id']: r['content'] for r in reqs_right}
+def highlight_inline(str_l, str_r):
+    if len(str_l) > 3000 or len(str_r) > 3000:
+        return f"<span class='char-diff'>{html.escape(str_l)}</span>", f"<span class='char-diff'>{html.escape(str_r)}</span>"
+        
+    sm_inline = difflib.SequenceMatcher(None, str_l, str_r)
+    left_out, right_out = "", ""
+    for op_in, m1, m2, n1, n2 in sm_inline.get_opcodes():
+        if op_in == 'equal':
+            left_out += html.escape(str_l[m1:m2])
+            right_out += html.escape(str_r[n1:n2])
+        else:
+            if m1 != m2: left_out += f"<span class='char-diff'>{html.escape(str_l[m1:m2])}</span>"
+            if n1 != n2: right_out += f"<span class='char-diff'>{html.escape(str_r[n1:n2])}</span>"
+    return left_out, right_out
+
+def berechne_diff_daten(lines_left, lines_right):
+    lines_left = heal_text(lines_left)
+    lines_right = heal_text(lines_right)
     
+    sm = difflib.SequenceMatcher(None, lines_left, lines_right)
+    
+    buckets = collections.OrderedDict()
+    current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
+    buckets[current_id] = []
+    
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == 'equal':
+            for l, r in zip(lines_left[i1:i2], lines_right[j1:j2]):
+                cid = extract_id(r) or extract_id(l)
+                if cid: 
+                    current_id = cid
+                    if current_id not in buckets: buckets[current_id] = []
+                buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': html.escape(r)})
+                
+        elif op == 'replace':
+            sub_l = lines_left[i1:i2]
+            sub_r = lines_right[j1:j2]
+            for k in range(max(len(sub_l), len(sub_r))):
+                l = sub_l[k] if k < len(sub_l) else ""
+                r = sub_r[k] if k < len(sub_r) else ""
+                
+                cid = extract_id(r) or extract_id(l)
+                if cid: 
+                    current_id = cid
+                    if current_id not in buckets: buckets[current_id] = []
+                
+                if l and r:
+                    l_out, r_out = highlight_inline(l, r)
+                    buckets[current_id].append({'tag': 'replace', 'left': l_out, 'right': r_out})
+                elif l:
+                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
+                elif r:
+                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+                    
+        elif op == 'delete':
+            for l in lines_left[i1:i2]:
+                cid = extract_id(l)
+                if cid: 
+                    current_id = cid
+                    if current_id not in buckets: buckets[current_id] = []
+                buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
+                
+        elif op == 'insert':
+            for r in lines_right[j1:j2]:
+                cid = extract_id(r)
+                if cid: 
+                    current_id = cid
+                    if current_id not in buckets: buckets[current_id] = []
+                buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+
+    left_ids = set()
+    right_ids = set()
+    img_diffs = 0
+    
+    for cid, items in buckets.items():
+        if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)":
+            if any(i['left'] for i in items): left_ids.add(cid)
+            if any(i['right'] for i in items): right_ids.add(cid)
+            
+        # Zähle veränderte Bilder in nicht-gleichen Blöcken
+        for item in items:
+            if item['tag'] != 'equal':
+                img_l = len(re.findall(r'\[BILD:', item['left']))
+                img_r = len(re.findall(r'\[BILD:', item['right']))
+                img_diffs += max(img_l, img_r)
+        
+    stats = {
+        "l_eq": 0, "l_rep": 0, "l_del": len(left_ids - right_ids), "l_tot": len(left_ids),
+        "r_eq": 0, "r_rep": 0, "r_ins": len(right_ids - left_ids), "r_tot": len(right_ids),
+        "img_diffs": img_diffs,
+        "has_reqs": len(left_ids) > 0 or len(right_ids) > 0
+    }
+    
+    intersect = left_ids & right_ids
+    for cid in intersect:
+        has_diff = any(i['tag'] != 'equal' and (i['left'] or i['right']) for i in buckets[cid])
+        if not has_diff:
+            stats['l_eq'] += 1; stats['r_eq'] += 1
+        else:
+            stats['l_rep'] += 1; stats['r_rep'] += 1
+
     diff_data = []
     block_id = 0
-    
-    for l_id in left_ids:
-        l_content = left_map[l_id]
-        if l_id in right_map:
-            r_content = right_map[l_id]
-            str_l = "".join(l_content)
-            str_r = "".join(r_content)
-            
-            if str_l == str_r:
-                tag = 'equal'
-                diff_data.append({'id': block_id, 'tag': tag, 'left': [html.escape(l) for l in l_content], 'right': [html.escape(l) for l in r_content], 'req_id': l_id})
-            else:
-                tag = 'replace'
-                if len(str_l) > 2000 or len(str_r) > 2000:
-                    sm2 = difflib.SequenceMatcher(None, l_content, r_content)
-                    left_out, right_out = "", ""
-                    for op, i1, i2, j1, j2 in sm2.get_opcodes():
-                        chunk_l = "".join(l_content[i1:i2])
-                        chunk_r = "".join(r_content[j1:j2])
-                        if op == 'equal':
-                            left_out += html.escape(chunk_l)
-                            right_out += html.escape(chunk_r)
-                        else:
-                            if chunk_l: left_out += f"<span class='char-diff'>{html.escape(chunk_l)}</span>"
-                            if chunk_r: right_out += f"<span class='char-diff'>{html.escape(chunk_r)}</span>"
-                else:
-                    sm2 = difflib.SequenceMatcher(None, str_l, str_r)
-                    left_out, right_out = "", ""
-                    for op, i1, i2, j1, j2 in sm2.get_opcodes():
-                        chunk_l = html.escape(str_l[i1:i2])
-                        chunk_r = html.escape(str_r[j1:j2])
-                        if op == 'equal':
-                            left_out += chunk_l
-                            right_out += chunk_r
-                        else:
-                            if chunk_l: left_out += f"<span class='char-diff'>{chunk_l}</span>"
-                            if chunk_r: right_out += f"<span class='char-diff'>{chunk_r}</span>"
-                            
-                diff_data.append({'id': block_id, 'tag': tag, 'left': [left_out], 'right': [right_out], 'req_id': l_id})
-            
-            del right_map[l_id]
-        else:
-            diff_data.append({'id': block_id, 'tag': 'delete', 'left': [html.escape(l) for l in l_content], 'right': [], 'req_id': l_id})
-        block_id += 1
+    for cid, items in buckets.items():
+        if not items: continue
+        left_htmls, right_htmls = [], []
+        tag_set = set()
         
-    for r_id in right_ids:
-        if r_id in right_map:
-            diff_data.append({'id': block_id, 'tag': 'insert', 'left': [], 'right': [html.escape(l) for l in right_map[r_id]], 'req_id': r_id})
-            block_id += 1
+        prefix = f"<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px;'>[{cid}]</div>" if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)" else ""
+        
+        for item in items:
+            left_htmls.append(f"<div class='inner-line bg-{item['tag']}'>{item['left']}</div>" if item['left'] else "<div class='inner-line bg-empty'></div>")
+            right_htmls.append(f"<div class='inner-line bg-{item['tag']}'>{item['right']}</div>" if item['right'] else "<div class='inner-line bg-empty'></div>")
+            tag_set.add(item['tag'])
             
-    return diff_data
+        overall_tag = 'equal' if tag_set == {'equal'} else 'replace'
+        
+        diff_data.append({
+            'id': block_id,
+            'req_id': cid,
+            'tag': overall_tag,
+            'left': prefix + "".join(left_htmls),
+            'right': prefix + "".join(right_htmls)
+        })
+        block_id += 1
+
+    return diff_data, stats
 
 class DiffRequestHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass 
+    def log_message(self, format, *args): pass 
 
     def do_POST(self):
         global START_FILE_LEFT, START_FILE_RIGHT, DISPLAY_NAME_LEFT, DISPLAY_NAME_RIGHT
@@ -336,31 +294,30 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             
             temp_dir = tempfile.gettempdir()
             save_path = os.path.join(temp_dir, f"delta_tmp_{side}.docx")
-            with open(save_path, 'wb') as f:
-                f.write(file_data)
+            with open(save_path, 'wb') as f: f.write(file_data)
                 
             if side == 'left':
-                START_FILE_LEFT = save_path
-                DISPLAY_NAME_LEFT = filename
+                START_FILE_LEFT = save_path; DISPLAY_NAME_LEFT = filename
             elif side == 'right':
-                START_FILE_RIGHT = save_path
-                DISPLAY_NAME_RIGHT = filename
+                START_FILE_RIGHT = save_path; DISPLAY_NAME_RIGHT = filename
                 
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
+            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(b'{"status": "ok"}')
 
     def do_GET(self):
         global START_FILE_LEFT, START_FILE_RIGHT, DISPLAY_NAME_LEFT, DISPLAY_NAME_RIGHT
         parsed_url = urlparse(self.path)
         
-        if parsed_url.path == '/api/report':
-            success = generate_word_report()
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
+        if parsed_url.path == '/api/diff_data':
+            try:
+                info_l = get_file_info(START_FILE_LEFT)
+                info_r = get_file_info(START_FILE_RIGHT)
+                diff, stats = berechne_diff_daten(info_l['content'], info_r['content'])
+                self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
+                self.wfile.write(json.dumps({"diff": diff, "stats": stats}).encode('utf-8'))
+            except Exception as e:
+                self.send_response(500); self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
             return
             
         if parsed_url.path == '/api/jump':
@@ -370,65 +327,15 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             
             target_file = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
             success = jump_to_word_page(target_file, page)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
+            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
-            return
-            
-        if parsed_url.path == '/api/word_fuse':
-            success = try_word_fusion(START_FILE_LEFT, START_FILE_RIGHT)
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
-            return
-            
-        if parsed_url.path == '/media':
-            query = parse_qs(parsed_url.query)
-            side = query.get('side', [''])[0]
-            file_path_in_zip = query.get('file', [''])[0]
-            
-            docx_path = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
-            try:
-                with zipfile.ZipFile(docx_path, 'r') as z:
-                    data = z.read(file_path_in_zip)
-                    self.send_response(200)
-                    ext = file_path_in_zip.lower().split('.')[-1]
-                    content_types = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif'}
-                    self.send_header('Content-type', content_types.get(ext, 'application/octet-stream'))
-                    self.end_headers()
-                    self.wfile.write(data)
-            except Exception:
-                self.send_response(404)
-                self.end_headers()
             return
             
         if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            
-            info_l = get_file_info(START_FILE_LEFT)
-            info_r = get_file_info(START_FILE_RIGHT)
-            initial_diff = berechne_diff_daten(info_l['content'], info_r['content'])
-            
+            self.send_response(200); self.send_header('Content-type', 'text/html; charset=utf-8'); self.end_headers()
             name_l = DISPLAY_NAME_LEFT if DISPLAY_NAME_LEFT else "Keine Datei (Links)"
             name_r = DISPLAY_NAME_RIGHT if DISPLAY_NAME_RIGHT else "Keine Datei (Rechts)"
-            
-            html_content = self.get_html_template().replace(
-                "APP_VERSION", APP_VERSION
-            ).replace(
-                "NAME_LEFT", name_l
-            ).replace(
-                "NAME_RIGHT", name_r
-            )
-            
-            # WICHTIG: Sichere JSON-Injektion gegen unsichtbare Zeilenumbrüche
-            safe_json = json.dumps(initial_diff).replace('\\', '\\\\')
-            html_content = html_content.replace("INITIAL_DIFF_DATA_SAFE_JSON", safe_json)
-            
+            html_content = self.get_html_template().replace("APP_VERSION", APP_VERSION).replace("NAME_LEFT", name_l).replace("NAME_RIGHT", name_r)
             self.wfile.write(html_content.encode('utf-8'))
 
     def get_html_template(self):
@@ -439,324 +346,259 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             <meta charset="utf-8">
             <title>Advanced Delta Tool</title>
             <style>
-                :root {
-                    --bg-dark: #1e1e1e; --bg-panel: #252526; --text-main: #d4d4d4;
-                    --insert: rgba(40, 167, 69, 0.2); --delete: rgba(220, 53, 69, 0.2); --replace: rgba(0, 123, 255, 0.2);
-                }
+                :root { --bg-dark: #1e1e1e; --bg-panel: #252526; --text-main: #d4d4d4; }
                 body { margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; background: var(--bg-dark); color: var(--text-main); overflow: hidden; }
-                
                 #header-container { display: flex; background: #333; border-bottom: 2px solid #444; }
                 .pane-header { flex: 1; padding: 10px; display: flex; justify-content: space-between; align-items: center; }
                 .pane-header.left { border-right: 1px solid #444; }
-                
                 .header-title { font-weight: bold; color: #9cdcfe; font-size: 15px; max-width: 350px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #1e1e1e; padding: 4px 10px; border-radius: 4px; border: 1px solid #555;}
-                
                 .view-select { background: #007acc; border: 1px solid #005f9e; color: white; padding: 5px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: pointer; outline: none;}
-                .view-select:hover { background: #005f9e; }
-                
                 .word-btn { background: #107c41; margin-top: 5px; width: 100%; border:none; color:white; padding:4px; font-size:11px; cursor:pointer; border-radius: 3px; font-weight:bold;}
-                .report-btn { background: #005a9e; margin-top: 5px; width: 100%; border:none; color:white; padding:4px; font-size:11px; cursor:pointer; border-radius: 3px; font-weight:bold;}
-                
                 .center-panel { width: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg-panel); padding: 5px 10px; font-size: 10px; color: #888; border-left: 1px solid #444; border-right: 1px solid #444; box-sizing: border-box;}
-                
                 #workspace { display: flex; flex: 1; overflow: hidden; position: relative; }
-                .editor-container { flex: 1; overflow-y: auto; padding: 10px; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.5; scroll-behavior: smooth; position: relative;}
-                
+                .editor-container { flex: 1; overflow-y: auto; padding: 10px; font-size: 13px; line-height: 1.5; scroll-behavior: smooth; position: relative;}
                 .editor-container.drag-over { border: 3px dashed #007acc !important; background-color: rgba(0, 122, 204, 0.1) !important; }
                 .drag-overlay { display: none; position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.6); color: #007acc; font-size: 24px; font-weight: bold; align-items: center; justify-content: center; z-index: 100; pointer-events: none;}
                 .editor-container.drag-over .drag-overlay { display: flex; }
-                
                 #svg-container { width: 100px; flex-shrink: 0; position: relative; background: var(--bg-panel); border-left: 1px solid #444; border-right: 1px solid #444; }
                 svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
                 
-                .code-block { padding: 2px 5px; white-space: pre-wrap; border-radius: 3px; margin-bottom: 5px; }
-                .tag-insert { background-color: var(--insert); border-left: 3px solid #28a745; }
-                .tag-delete { background-color: var(--delete); border-left: 3px solid #dc3545; text-decoration: line-through; opacity: 0.8; }
-                .tag-replace { background-color: var(--replace); border-left: 3px solid #007bff; }
+                .bucket-block { background-color: #252526; border: 1px solid #444; border-radius: 4px; margin-bottom: 12px; padding: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);}
+                .inner-line { padding: 2px 5px; margin-bottom: 3px; border-radius: 2px; min-height: 1.2em; word-wrap: break-word; font-family: 'Consolas', monospace;}
                 
-                .char-diff { background-color: rgba(0, 123, 255, 0.6); color: white; font-weight: bold; border-radius: 2px; padding: 0 1px; }
-                .inline-img { max-width: 90%; max-height: 300px; border: 2px dashed #007acc; padding: 5px; margin: 10px 0; background: #2d2d2d; border-radius: 4px; display: block; }
+                .bg-insert { background-color: rgba(40, 167, 69, 0.2); border-left: 3px solid #28a745; }
+                .bg-delete { background-color: rgba(220, 53, 69, 0.2); border-left: 3px solid #dc3545; text-decoration: line-through; opacity: 0.8; }
+                .bg-replace { background-color: rgba(0, 123, 255, 0.2); border-left: 3px solid #007bff; }
+                .bg-equal { background-color: transparent; border-left: 3px solid #555; }
+                .bg-empty { background-color: transparent; min-height: 1.2em; }
                 
-                .page-break-line { border-top: 1px dashed #dc3545; margin: 20px 0; position: relative; width: 100%; }
+                .char-diff { background-color: rgba(0, 123, 255, 0.6); color: white; font-weight: bold; border-radius: 2px; padding: 0 2px; }
+                
+                .page-break-line { border-top: 1px dashed #dc3545; margin: 15px 0; position: relative; width: 100%; }
                 .page-break-line span { 
                     background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; 
                     border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px;
                 }
-                .jump-btn {
-                    background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; 
-                    font-size: 9px; cursor: pointer; padding: 2px 4px; transition: 0.2s;
-                }
+                .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 9px; cursor: pointer; padding: 2px 4px;}
                 .jump-btn:hover { background: #fff; color: #dc3545; }
                 
                 .editor-container.view-delta .tag-equal { display: none !important; }
-                .editor-container.view-equal .tag-replace, 
-                .editor-container.view-equal .tag-insert, 
-                .editor-container.view-equal .tag-delete { display: none !important; }
+                .editor-container.view-equal .tag-replace, .editor-container.view-equal .tag-insert, .editor-container.view-equal .tag-delete { display: none !important; }
                 
-                @supports selector(:has(div)) {
-                    .editor-container.view-delta .tag-equal:has(.page-break-line) {
-                        display: block !important;
-                        font-size: 0 !important; 
-                        color: transparent !important;
-                        padding: 0 !important; margin: 0 !important; border: none !important;
-                    }
-                    .editor-container.view-delta .tag-equal:has(.page-break-line) img {
-                        display: none !important;
-                    }
-                }
+                #loading-screen { position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#007acc; font-size:24px; font-weight:bold; z-index: 1000; text-align: center; }
             </style>
         </head>
         <body>
-            <!-- SICHERER DATEN-TRESOR GEGEN ABSTÜRZE -->
-            <script type="application/json" id="diff-data-store">
-                INITIAL_DIFF_DATA_SAFE_JSON
-            </script>
+            <div id="loading-screen">⏳ Lade Semantic Engine...</div>
 
-            <div id="header-container">
+            <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
                     <span class="header-title" title="NAME_LEFT">📄 NAME_LEFT</span>
-                    <select id="view-left" class="view-select" onchange="changeView('left')">
-                        <option value="all">Ansicht: Alles</option>
-                        <option value="delta">Ansicht: Nur Deltas</option>
-                        <option value="equal">Ansicht: Nur Gleiche</option>
-                    </select>
+                    <select id="view-left" class="view-select" onchange="changeView('left')"><option value="all">Ansicht: Alles</option><option value="delta">Nur Deltas</option><option value="equal">Nur Gleiche</option></select>
                 </div>
                 
                 <div class="center-panel">
                     <div style="margin-bottom: 5px; font-weight:bold;">APP_VERSION</div>
-                    <div id="req-mode-badge" style="display:none; background:#28a745; color:white; padding:2px 4px; border-radius:3px; margin-bottom: 5px; font-weight:bold;">✅ REQ MODE</div>
+                    <div id="req-mode-badge" style="display:none; background:#28a745; color:white; padding:2px 4px; border-radius:3px; margin-bottom: 5px; font-weight:bold;">✅ SEMANTIC SYNC</div>
                     
                     <div id="stats-panel" style="display:none; width: 100%; background: #1e1e1e; border-radius: 4px; padding: 6px; box-sizing: border-box; text-align: left; margin-bottom: 5px; border: 1px solid #444;">
-                        <div style="color:#d4d4d4; font-size:11px; margin-bottom:4px; text-align:center; border-bottom:1px solid #444; padding-bottom:3px;"><b>ID Statistik</b></div>
-                        
+                        <div style="color:#d4d4d4; font-size:11px; margin-bottom:4px; text-align:center; border-bottom:1px solid #444; padding-bottom:3px;"><b>Statistik</b></div>
                         <div style="display:flex; justify-content: space-between; font-size: 9px; line-height: 1.4;">
                             <div style="width: 48%;">
-                                <u style="color:#9cdcfe">Original (Links)</u><br>
-                                Gleich: <span id="l-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
-                                Geändert: <span id="l-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>
-                                Gelöscht: <span id="l-del" style="float:right; font-weight:bold; color:#dc3545;">0</span><br>
-                                <div style="border-top: 1px solid #444; margin-top: 2px; padding-top: 2px;">
-                                    <b>Total: <span id="l-tot" style="float:right;">0</span></b>
-                                </div>
+                                <u style="color:#9cdcfe">Links</u><br>Gleich: <span id="l-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
+                                Geändert: <span id="l-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Gelöscht: <span id="l-del" style="float:right; font-weight:bold; color:#dc3545;">0</span>
                             </div>
                             <div style="border-left: 1px solid #444; padding-left: 4px; width: 48%;">
-                                <u style="color:#9cdcfe">Neu (Rechts)</u><br>
-                                Gleich: <span id="r-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
-                                Geändert: <span id="r-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>
-                                Neu: <span id="r-ins" style="float:right; font-weight:bold; color:#28a745;">0</span><br>
-                                <div style="border-top: 1px solid #444; margin-top: 2px; padding-top: 2px;">
-                                    <b>Total: <span id="r-tot" style="float:right;">0</span></b>
-                                </div>
+                                <u style="color:#9cdcfe">Rechts</u><br>Gleich: <span id="r-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
+                                Geändert: <span id="r-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Neu: <span id="r-ins" style="float:right; font-weight:bold; color:#28a745;">0</span>
                             </div>
                         </div>
-                        
-                        <div style="margin-top: 6px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
-                            <label style="cursor: pointer; color: #d4d4d4;"><input type="checkbox" id="chk-equal-lines" onchange="drawLines()"> Gleiche Linien zeigen</label>
+                        <div style="border-top: 1px solid #444; margin-top: 4px; padding-top: 4px; text-align: center; font-size: 9px; font-weight: bold; color: #ff9800;">
+                            Bilder geändert: <span id="img-diffs">0</span>
                         </div>
                     </div>
 
-                    <button class="report-btn" onclick="triggerReport()" style="display:none;" id="btn-report">📊 Report (Word) erzeugen</button>
-                    <button class="word-btn" onclick="triggerWordFusion()">🗎 In MS Word öffnen</button>
+                    <div style="margin-top: 5px; text-align: center; font-size: 11px; background: #1e1e1e; border: 1px solid #444; padding: 4px; border-radius: 3px; width: 100%; box-sizing: border-box;">
+                        <b style="color: #9cdcfe;">MS Word Live-Sync</b><br>
+                        <label style="cursor:pointer;"><input type="checkbox" id="sync-left" onchange="doLiveSync()"> Links</label> &nbsp;
+                        <label style="cursor:pointer;"><input type="checkbox" id="sync-right" onchange="doLiveSync()"> Rechts</label>
+                    </div>
+
+                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report</button>
                 </div>
                 
                 <div class="pane-header right">
                     <span class="header-title" title="NAME_RIGHT">📄 NAME_RIGHT</span>
-                    <select id="view-right" class="view-select" onchange="changeView('right')">
-                        <option value="all">Ansicht: Alles</option>
-                        <option value="delta">Ansicht: Nur Deltas</option>
-                        <option value="equal">Ansicht: Nur Gleiche</option>
-                    </select>
+                    <select id="view-right" class="view-select" onchange="changeView('right')"><option value="all">Ansicht: Alles</option><option value="delta">Nur Deltas</option><option value="equal">Nur Gleiche</option></select>
                 </div>
             </div>
 
-            <div id="workspace">
+            <div id="workspace" style="visibility: hidden;">
                 <div id="left-editor" class="editor-container" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, 'left')"></div>
                 <div id="svg-container"><svg id="lines-svg"></svg></div>
                 <div id="right-editor" class="editor-container" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, 'right')"></div>
             </div>
 
             <script>
-                // JSON-Daten SICHER aus dem Tresor laden!
-                const rawJsonStr = document.getElementById('diff-data-store').textContent.trim();
-                const diffData = rawJsonStr ? JSON.parse(rawJsonStr) : [];
+                let diffData = []; let statsData = {};
+                let syncTimer = null;
+                let lastPageL = -1; let lastPageR = -1;
                 
-                const leftEditor = document.getElementById('left-editor');
-                const rightEditor = document.getElementById('right-editor');
-                const svg = document.getElementById('lines-svg');
+                window.onload = function() {
+                    fetch('/api/diff_data').then(res => res.json()).then(data => {
+                        if (data.error) { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`; return; }
+                        diffData = data.diff; statsData = data.stats;
+                        document.getElementById('loading-screen').style.display = 'none';
+                        document.getElementById('header-container').style.visibility = 'visible';
+                        document.getElementById('workspace').style.visibility = 'visible';
+                        renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
+                    }).catch(err => { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Browser-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`; });
+                };
+
                 const svgContainer = document.getElementById('svg-container');
 
-                function handleDragOver(e) { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('drag-over'); }
-                function handleDragLeave(e) { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('drag-over'); }
+                function handleDragOver(e) { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }
+                function handleDragLeave(e) { e.preventDefault(); e.currentTarget.classList.remove('drag-over'); }
                 async function handleDrop(e, side) {
-                    e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('drag-over');
+                    e.preventDefault(); e.currentTarget.classList.remove('drag-over');
                     const file = e.dataTransfer.files[0];
                     if (!file) return;
-                    const overlay = e.currentTarget.querySelector('.drag-overlay');
-                    if(overlay) { overlay.textContent = "⚙️ VERARBEITE..."; overlay.style.display = "flex"; }
+                    e.currentTarget.querySelector('.drag-overlay').style.display = "flex";
                     try {
                         const arrayBuffer = await file.arrayBuffer();
-                        const filename = encodeURIComponent(file.name);
-                        const response = await fetch(`/api/upload?side=${side}&filename=${filename}`, { method: 'POST', body: arrayBuffer });
+                        const response = await fetch(`/api/upload?side=${side}&filename=${encodeURIComponent(file.name)}`, { method: 'POST', body: arrayBuffer });
                         if (response.ok) window.location.reload(); 
-                    } catch (error) { alert("Verbindungsfehler zum lokalen Server."); }
+                    } catch (error) { alert("Upload-Fehler"); }
                 }
 
-                function triggerWordFusion() {
-                    const btn = document.querySelector('.word-btn');
-                    btn.textContent = "⏳ Starte Word..."; btn.style.background = "#ff9800";
-                    fetch('/api/word_fuse').then(res => res.json()).then(data => {
-                        if(!data.success) alert("MS Word Fusion fehlgeschlagen.");
-                        btn.textContent = "🗎 In MS Word öffnen"; btn.style.background = "#107c41";
-                    });
-                }
-                
-                function triggerReport() {
-                    const btn = document.getElementById('btn-report');
-                    btn.textContent = "⏳ Generiere..."; btn.style.background = "#ff9800";
-                    fetch('/api/report').then(res => res.json()).then(data => {
-                        if(!data.success) alert("Konnte Word-Report nicht erstellen.");
-                        btn.textContent = "📊 Report (Word) erzeugen"; btn.style.background = "#005a9e";
-                    });
-                }
-                
                 function jumpToPage(side, page) {
                     fetch(`/api/jump?side=${side}&page=${page}`).then(res => res.json()).then(data => {
-                        if(!data.success) alert("Konnte Word nicht fernsteuern. Ist die Datei am Speicherort verfügbar?");
+                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen.");
                     });
+                }
+
+                function getPage(eid) {
+                    let ed = document.getElementById(eid);
+                    let breaks = ed.getElementsByClassName('page-break-line');
+                    let curr = 1;
+                    let viewTop = ed.scrollTop;
+                    for(let b of breaks) {
+                        if(b.offsetTop <= viewTop + (ed.clientHeight/2)) {
+                            curr = parseInt(b.getAttribute('data-page') || curr);
+                        } else { break; }
+                    }
+                    return curr;
+                }
+
+                function doLiveSync() {
+                    clearTimeout(syncTimer);
+                    syncTimer = setTimeout(() => {
+                        if(document.getElementById('sync-left').checked) {
+                            let p = getPage('left-editor');
+                            if(p && p !== lastPageL) { lastPageL = p; fetch(`/api/jump?side=left&page=${p}`); }
+                        }
+                        if(document.getElementById('sync-right').checked) {
+                            let p = getPage('right-editor');
+                            if(p && p !== lastPageR) { lastPageR = p; fetch(`/api/jump?side=right&page=${p}`); }
+                        }
+                    }, 800); // 800ms debounce
                 }
 
                 function changeView(side) {
                     const editor = document.getElementById(side + '-editor');
                     const val = document.getElementById('view-' + side).value;
-                    
                     editor.classList.remove('view-delta', 'view-equal');
-                    if (val !== 'all') {
-                        editor.classList.add('view-' + val);
-                    }
+                    if (val !== 'all') editor.classList.add('view-' + val);
                     setTimeout(drawLines, 50); 
                 }
 
                 function renderSpecialTags(htmlStr, side) {
-                    let res = htmlStr.replace(/\\[BILD:\s*(.*?)\s*\|\s*HASH:.*?\\]/g, `<img src="/media?side=${side}&file=$1" class="inline-img" alt="Bild ($1)" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Fehlendes Bild: $1</div>'">`);
-                    res = res.replace(/\\[SEITENUMBRUCH:\s*(\d+)\\]/g, `<div class="page-break-line"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)" title="In MS Word direkt auf diese Seite springen">🎯 Word</button></span></div>`);
+                    let res = htmlStr.replace(/\\[BILD:\s*(.*?)\s*\|\s*HASH:.*?\\]/g, `<div style="border:1px solid #007acc; padding:4px; margin:4px 0; background:#2d2d2d; color:#9cdcfe; font-size:10px; border-radius:3px;">🖼️ BILD-OBJEKT [$1]</div>`);
+                    res = res.replace(/\\[SEITENUMBRUCH:\s*(\d+)\\]/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
                     return res;
                 }
-                
-                function updateStats() {
-                    let eq = 0, rep = 0, ins = 0, del = 0;
-                    
-                    diffData.forEach(block => {
-                        if(block.req_id && block.req_id !== 'HEADER') {
-                            if(block.tag === 'equal') eq++;
-                            else if(block.tag === 'replace') rep++;
-                            else if(block.tag === 'insert') ins++;
-                            else if(block.tag === 'delete') del++;
-                        }
-                    });
 
-                    document.getElementById('l-eq').textContent = eq;
-                    document.getElementById('l-rep').textContent = rep;
-                    document.getElementById('l-del').textContent = del;
-                    document.getElementById('l-tot').textContent = eq + rep + del;
-
-                    document.getElementById('r-eq').textContent = eq;
-                    document.getElementById('r-rep').textContent = rep;
-                    document.getElementById('r-ins').textContent = ins;
-                    document.getElementById('r-tot').textContent = eq + rep + ins;
-                }
-
-                function renderEditors() {
-                    const isReqMode = diffData.some(d => d.req_id && d.req_id !== 'HEADER');
-                    if (isReqMode) {
+                function renderEditors(leftEditor, rightEditor) {
+                    if (statsData.has_reqs) {
                         document.getElementById('req-mode-badge').style.display = 'block';
                         document.getElementById('stats-panel').style.display = 'block';
-                        document.getElementById('btn-report').style.display = 'block';
-                        updateStats();
+                        document.getElementById('l-eq').textContent = statsData.l_eq;
+                        document.getElementById('l-rep').textContent = statsData.l_rep;
+                        document.getElementById('l-del').textContent = statsData.l_del;
+                        document.getElementById('r-eq').textContent = statsData.r_eq;
+                        document.getElementById('r-rep').textContent = statsData.r_rep;
+                        document.getElementById('r-ins').textContent = statsData.r_ins;
+                        document.getElementById('img-diffs').textContent = statsData.img_diffs;
                     }
 
                     diffData.forEach(block => {
                         const lDiv = document.createElement('div');
-                        lDiv.id = `l-${block.id}`; lDiv.className = `code-block tag-${block.tag}`;
-                        let lHtml = block.left.join('');
-                        lDiv.innerHTML = renderSpecialTags(lHtml, 'left') || '<br>';
+                        lDiv.id = `l-${block.id}`; lDiv.className = `bucket-block tag-${block.tag}`;
+                        lDiv.innerHTML = renderSpecialTags(block.left, 'left') || '';
                         leftEditor.appendChild(lDiv);
 
                         const rDiv = document.createElement('div');
-                        rDiv.id = `r-${block.id}`; rDiv.className = `code-block tag-${block.tag}`;
-                        let rHtml = block.right.join('');
-                        rDiv.innerHTML = renderSpecialTags(rHtml, 'right') || '<br>';
+                        rDiv.id = `r-${block.id}`; rDiv.className = `bucket-block tag-${block.tag}`;
+                        rDiv.innerHTML = renderSpecialTags(block.right, 'right') || '';
                         rightEditor.appendChild(rDiv);
                     });
                     
                     leftEditor.innerHTML += '<div class="drag-overlay">📥 HIER ABLEGEN</div>';
                     rightEditor.innerHTML += '<div class="drag-overlay">📥 HIER ABLEGEN</div>';
-                    
                     setTimeout(drawLines, 200);
                 }
 
                 function drawLines() {
+                    const svg = document.getElementById('lines-svg');
+                    const leftEditor = document.getElementById('left-editor');
+                    const rightEditor = document.getElementById('right-editor');
+                    if (!svg || !leftEditor || !rightEditor) return;
+                    
                     svg.innerHTML = '';
                     const svgWidth = svgContainer.clientWidth;
                     const lScroll = leftEditor.scrollTop;
                     const rScroll = rightEditor.scrollTop;
-                    
-                    const chk = document.getElementById('chk-equal-lines');
-                    const showEqual = chk ? chk.checked : false;
 
                     diffData.forEach(block => {
-                        if (block.tag === 'equal' && !showEqual) return;
-                        
                         const lEl = document.getElementById(`l-${block.id}`);
                         const rEl = document.getElementById(`r-${block.id}`);
-                        
-                        if (!lEl || !rEl) return;
-                        if (lEl.offsetParent === null || rEl.offsetParent === null) return;
+                        if (!lEl || !rEl || lEl.offsetParent === null || rEl.offsetParent === null) return;
                         
                         const lY = lEl.offsetTop + (lEl.offsetHeight / 2) - lScroll;
                         const rY = rEl.offsetTop + (rEl.offsetHeight / 2) - rScroll;
                         
-                        let color = '#007bff';
-                        let opacity = '0.6';
-                        let strokeWidth = '2';
-                        
-                        if (block.tag === 'insert') color = '#28a745';
-                        if (block.tag === 'delete') color = '#dc3545';
-                        
-                        if (block.tag === 'equal') {
-                            color = '#666666';
-                            opacity = '0.3';
-                            strokeWidth = '1';
-                        }
+                        let color = block.tag === 'insert' ? '#28a745' : block.tag === 'delete' ? '#dc3545' : block.tag === 'equal' ? '#666666' : '#007bff';
+                        let opacity = block.tag === 'equal' ? '0.3' : '0.6';
+                        let strokeWidth = block.tag === 'equal' ? '1' : '2';
 
                         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                         path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
-                        path.setAttribute('fill', 'none'); 
-                        path.setAttribute('stroke', color);
-                        path.setAttribute('stroke-width', strokeWidth); 
-                        path.setAttribute('opacity', opacity);
+                        path.setAttribute('fill', 'none'); path.setAttribute('stroke', color);
+                        path.setAttribute('stroke-width', strokeWidth); path.setAttribute('opacity', opacity);
                         svg.appendChild(path);
                     });
                 }
 
                 let isSyncingLeft = false; let isSyncingRight = false;
-                leftEditor.addEventListener('scroll', function() {
+                document.getElementById('left-editor')?.addEventListener('scroll', function() {
                     if (!isSyncingLeft) {
                         isSyncingRight = true;
-                        rightEditor.scrollTop = this.scrollTop / (this.scrollHeight - this.clientHeight) * (rightEditor.scrollHeight - rightEditor.clientHeight);
+                        document.getElementById('right-editor').scrollTop = this.scrollTop / (this.scrollHeight - this.clientHeight) * (document.getElementById('right-editor').scrollHeight - document.getElementById('right-editor').clientHeight);
                         drawLines();
                     }
                     isSyncingLeft = false;
+                    doLiveSync();
                 });
-                rightEditor.addEventListener('scroll', function() {
+                document.getElementById('right-editor')?.addEventListener('scroll', function() {
                     if (!isSyncingRight) {
                         isSyncingLeft = true;
-                        leftEditor.scrollTop = this.scrollTop / (this.scrollHeight - this.clientHeight) * (leftEditor.scrollHeight - leftEditor.clientHeight);
+                        document.getElementById('left-editor').scrollTop = this.scrollTop / (this.scrollHeight - this.clientHeight) * (document.getElementById('left-editor').scrollHeight - document.getElementById('left-editor').clientHeight);
                         drawLines();
                     }
                     isSyncingRight = false;
+                    doLiveSync();
                 });
 
-                window.onload = renderEditors;
                 window.addEventListener('resize', drawLines);
             </script>
         </body>
@@ -765,9 +607,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
 def start_fallback_server():
     server = HTTPServer(('localhost', 0), DiffRequestHandler)
-    port = server.server_port
-    print(f"Tool laeuft. Oeffne Browser: http://localhost:{port}")
-    webbrowser.open(f'http://localhost:{port}')
+    print(f"Tool laeuft. Oeffne Browser: http://localhost:{server.server_port}")
+    webbrowser.open(f'http://localhost:{server.server_port}')
     server.serve_forever()
 
 if __name__ == "__main__":
@@ -775,8 +616,8 @@ if __name__ == "__main__":
     root.withdraw()
     root.attributes('-topmost', True)
     
-    START_FILE_LEFT = filedialog.askopenfilename(title="Wähle LINKE Datei (oder Abbrechen für leeres Tool)", filetypes=[("Word/Text", "*.docx *.txt *.md")])
-    START_FILE_RIGHT = filedialog.askopenfilename(title="Wähle RECHTE Datei (oder Abbrechen für leeres Tool)", filetypes=[("Word/Text", "*.docx *.txt *.md")])
+    START_FILE_LEFT = filedialog.askopenfilename(title="Wähle LINKE Datei", filetypes=[("Word/Text", "*.docx *.txt *.md")])
+    START_FILE_RIGHT = filedialog.askopenfilename(title="Wähle RECHTE Datei", filetypes=[("Word/Text", "*.docx *.txt *.md")])
     
     if START_FILE_LEFT: DISPLAY_NAME_LEFT = os.path.basename(START_FILE_LEFT)
     if START_FILE_RIGHT: DISPLAY_NAME_RIGHT = os.path.basename(START_FILE_RIGHT)
@@ -784,8 +625,5 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=start_fallback_server, daemon=True)
     server_thread.start()
     
-    try:
-        while True:
-            threading.Event().wait(1)
-    except KeyboardInterrupt:
-        pass
+    try: threading.Event().wait(1)
+    except KeyboardInterrupt: pass
