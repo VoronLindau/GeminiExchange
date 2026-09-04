@@ -12,9 +12,10 @@ import threading
 import html
 import tempfile
 import collections
+import traceback
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v20.0 (Media-Diff & Word Live-Sync Engine)"
+APP_VERSION = "v21.0 (Enterprise Scale & Word-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -50,7 +51,7 @@ def jump_to_word_page(file_path, page_num):
         return False
 
 # ==========================================
-# MODUS 2: PURE PYTHON XML PARSER
+# MODUS 2: PURE PYTHON XML PARSER (Skalierbar)
 # ==========================================
 def get_docx_data(file_path):
     content = []
@@ -96,7 +97,12 @@ def get_docx_data(file_path):
                                 para_text += f"\n[BILD: {img_path} | HASH: {img_hash}]\n"
                     
                     txt = para_text.strip()
-                    if txt: content.append(txt)
+                    if txt:
+                        # Multi-Line Shredder: Zerteilt riesige Textknoten zeilenweise für extrem schnelles Matching
+                        for line in txt.split('\n'):
+                            clean_line = line.strip()
+                            if clean_line:
+                                content.append(clean_line)
                 
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
@@ -145,7 +151,7 @@ def heal_text(lines):
     return res
 
 def extract_id(text):
-    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+\.\d+(?:\.\d+)*[a-zA-Z]?)(?:\s|$)', text, re.IGNORECASE)
+    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+(?:\.\d+)+[a-zA-Z]?|\d+\.)(?:\s|$)', text, re.IGNORECASE)
     if m: return m.group(0).strip()
     return None
 
@@ -168,7 +174,8 @@ def berechne_diff_daten(lines_left, lines_right):
     lines_left = heal_text(lines_left)
     lines_right = heal_text(lines_right)
     
-    sm = difflib.SequenceMatcher(None, lines_left, lines_right)
+    # autojunk=False verhindert das Überspringen wichtiger Code-Blöcke in sehr großen Dateien
+    sm = difflib.SequenceMatcher(None, lines_left, lines_right, autojunk=False)
     
     buckets = collections.OrderedDict()
     current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
@@ -228,7 +235,7 @@ def berechne_diff_daten(lines_left, lines_right):
             if any(i['left'] for i in items): left_ids.add(cid)
             if any(i['right'] for i in items): right_ids.add(cid)
             
-        # Zähle veränderte Bilder in nicht-gleichen Blöcken
+        # Zähle veränderte Bilder transparent in der Statistik
         for item in items:
             if item['tag'] != 'equal':
                 img_l = len(re.findall(r'\[BILD:', item['left']))
@@ -313,11 +320,22 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 info_l = get_file_info(START_FILE_LEFT)
                 info_r = get_file_info(START_FILE_RIGHT)
                 diff, stats = berechne_diff_daten(info_l['content'], info_r['content'])
-                self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
-                self.wfile.write(json.dumps({"diff": diff, "stats": stats}).encode('utf-8'))
+                
+                # Zwingend Content-Length setzen, sonst droppen moderne Browser bei riesigen JSON-Paketen die Verbindung!
+                response_json = json.dumps({"diff": diff, "stats": stats}).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(response_json)))
+                self.end_headers()
+                self.wfile.write(response_json)
             except Exception as e:
-                self.send_response(500); self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                traceback.print_exc()
+                error_json = json.dumps({"error": str(e)}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(error_json)))
+                self.end_headers()
+                self.wfile.write(error_json)
             return
             
         if parsed_url.path == '/api/jump':
@@ -353,6 +371,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .pane-header.left { border-right: 1px solid #444; }
                 .header-title { font-weight: bold; color: #9cdcfe; font-size: 15px; max-width: 350px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #1e1e1e; padding: 4px 10px; border-radius: 4px; border: 1px solid #555;}
                 .view-select { background: #007acc; border: 1px solid #005f9e; color: white; padding: 5px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: pointer; outline: none;}
+                .view-select:hover { background: #005f9e; }
                 .word-btn { background: #107c41; margin-top: 5px; width: 100%; border:none; color:white; padding:4px; font-size:11px; cursor:pointer; border-radius: 3px; font-weight:bold;}
                 .center-panel { width: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg-panel); padding: 5px 10px; font-size: 10px; color: #888; border-left: 1px solid #444; border-right: 1px solid #444; box-sizing: border-box;}
                 #workspace { display: flex; flex: 1; overflow: hidden; position: relative; }
@@ -389,7 +408,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <div id="loading-screen">⏳ Lade Semantic Engine...</div>
+            <div id="loading-screen">⏳ Lade Enterprise Engine... Bitte warten.</div>
 
             <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
@@ -424,7 +443,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         <label style="cursor:pointer;"><input type="checkbox" id="sync-right" onchange="doLiveSync()"> Rechts</label>
                     </div>
 
-                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report</button>
+                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report (Drucken)</button>
                 </div>
                 
                 <div class="pane-header right">
@@ -446,13 +465,18 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 
                 window.onload = function() {
                     fetch('/api/diff_data').then(res => res.json()).then(data => {
-                        if (data.error) { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`; return; }
+                        if (data.error) { 
+                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Interner Python-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`; 
+                            return; 
+                        }
                         diffData = data.diff; statsData = data.stats;
                         document.getElementById('loading-screen').style.display = 'none';
                         document.getElementById('header-container').style.visibility = 'visible';
                         document.getElementById('workspace').style.visibility = 'visible';
                         renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
-                    }).catch(err => { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Browser-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`; });
+                    }).catch(err => { 
+                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Browser-Verbindungsfehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">Verbindung zum lokalen Server abgebrochen. Lade die Seite neu. (${err})</span>`; 
+                    });
                 };
 
                 const svgContainer = document.getElementById('svg-container');
@@ -473,7 +497,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function jumpToPage(side, page) {
                     fetch(`/api/jump?side=${side}&page=${page}`).then(res => res.json()).then(data => {
-                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen.");
+                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen (Nutzt du LibreOffice?).");
                     });
                 }
 
@@ -501,7 +525,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             let p = getPage('right-editor');
                             if(p && p !== lastPageR) { lastPageR = p; fetch(`/api/jump?side=right&page=${p}`); }
                         }
-                    }, 800); // 800ms debounce
+                    }, 800);
                 }
 
                 function changeView(side) {
