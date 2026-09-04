@@ -10,12 +10,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import webbrowser
 import threading
 import html
-import tempfile
 import collections
-import traceback
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v21.0 (Enterprise Scale & Word-Sync Engine)"
+APP_VERSION = "v28.0 (Visual Connect & COM-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -23,13 +21,19 @@ DISPLAY_NAME_LEFT = ""
 DISPLAY_NAME_RIGHT = ""
 
 # ==========================================
-# MODUS 1: MICROSOFT WORD COM-STEUERUNG
+# MS WORD COM-STEUERUNG (Für Live-Sync)
 # ==========================================
 def jump_to_word_page(file_path, page_num):
     if not file_path or not os.path.exists(file_path):
+        print("Fehler: Temp-Datei nicht gefunden.")
         return False
     try:
         import win32com.client
+    except ImportError:
+        print("FEHLER: 'pywin32' fehlt! Bitte im Terminal 'pip install pywin32' ausführen.")
+        return False
+        
+    try:
         word = win32com.client.Dispatch("Word.Application")
         word.Visible = True 
         
@@ -40,23 +44,25 @@ def jump_to_word_page(file_path, page_num):
                 doc = d
                 break
         if not doc:
+            print(f"Öffne Word-Dokument in MS Word: {abs_path}")
             doc = word.Documents.Open(abs_path)
             
         doc.Activate()
         word.Activate()
-        # wdGoToPage = 1, wdGoToAbsolute = 1
+        # 1 = wdGoToPage, 1 = wdGoToAbsolute
         word.Selection.GoTo(1, 1, int(page_num))
+        print(f"-> Erfolgreich in Word auf Seite {page_num} gesprungen!")
         return True
     except Exception as e:
+        print(f"WORD-BLOCKADE (Evtl. Geschützte Ansicht?): {e}")
         return False
 
 # ==========================================
-# MODUS 2: PURE PYTHON XML PARSER (Skalierbar)
+# PURE PYTHON XML PARSER (Namespace-Agnostic + Images)
 # ==========================================
 def get_docx_data(file_path):
     content = []
     objects = {}
-    page_count = [1] 
     
     try:
         with zipfile.ZipFile(file_path, 'r') as z:
@@ -64,11 +70,14 @@ def get_docx_data(file_path):
             if 'word/_rels/document.xml.rels' in z.namelist():
                 import xml.etree.ElementTree as ET
                 rels_root = ET.fromstring(z.read('word/_rels/document.xml.rels'))
-                for rel in rels_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                    target = rel.get('Target')
-                    if target:
-                        if not target.startswith('word/'): target = 'word/' + target
-                        rels[rel.get('Id')] = target
+                for rel in rels_root.iter():
+                    if rel.tag.endswith('}Relationship'):
+                        r_id = rel.get('Id')
+                        target = rel.get('Target')
+                        if r_id and target:
+                            if target.startswith('/word/'): target = target[1:]
+                            elif not target.startswith('word/'): target = 'word/' + target
+                            rels[r_id] = target
 
             for name in z.namelist():
                 if name.startswith(('word/media/', 'word/embeddings/')):
@@ -78,47 +87,42 @@ def get_docx_data(file_path):
                 import xml.etree.ElementTree as ET
                 doc_root = ET.fromstring(z.read('word/document.xml'))
                 
-                for p in doc_root.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
-                    para_text = ""
-                    for node in p.iter():
-                        if node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}lastRenderedPageBreak' or \
-                           (node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br' and node.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type') == 'page'):
-                            page_count[0] += 1
-                            para_text += f"\n[SEITENUMBRUCH: {page_count[0]}]\n"
-                        elif node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t' and node.text:
-                            para_text += node.text
-                        elif node.tag == '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tab':
-                            para_text += " " 
-                        elif node.tag in ('{http://schemas.openxmlformats.org/drawingml/2006/main}blip', '{urn:schemas-microsoft-com:vml}imagedata'):
-                            r_id = node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed') or node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-                            if r_id and r_id in rels:
-                                img_path = rels[r_id]
-                                img_hash = objects.get(img_path, "NO_HASH")
-                                para_text += f"\n[BILD: {img_path} | HASH: {img_hash}]\n"
-                    
-                    txt = para_text.strip()
-                    if txt:
-                        # Multi-Line Shredder: Zerteilt riesige Textknoten zeilenweise für extrem schnelles Matching
-                        for line in txt.split('\n'):
-                            clean_line = line.strip()
-                            if clean_line:
-                                content.append(clean_line)
-                
+                for p in doc_root.iter():
+                    if p.tag.endswith('}p'):
+                        para_text = ""
+                        for node in p.iter():
+                            if node.tag.endswith('}t') and node.text:
+                                para_text += node.text
+                            elif node.tag.endswith('}tab'):
+                                para_text += " " 
+                            elif node.tag.endswith('}blip') or node.tag.endswith('}imagedata'):
+                                r_id = None
+                                for k, v in node.attrib.items():
+                                    if k.endswith('}embed') or k.endswith('}id') or k == 'id':
+                                        r_id = v
+                                        break
+                                if r_id and r_id in rels:
+                                    img_path = rels[r_id]
+                                    img_hash = objects.get(img_path, "NO_HASH")
+                                    para_text += f"\n[BILD:{img_path}|HASH:{img_hash}]\n"
+                        
+                        txt = para_text.strip()
+                        if txt: content.append(txt)
+                        
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
-    return content, objects
+    return content
 
 def get_file_info(file_path):
     if not file_path or not os.path.exists(file_path):
-        return {"path": "", "content": ["\n\n\n\n     ⬇ Bitte eine Office-Datei per Drag & Drop hier ablegen ⬇\n\n\n"], "objects": {}}
+        return {"path": "", "content": ["\n\n\n\n     ⬇ Bitte eine Office-Datei per Drag & Drop hier ablegen ⬇\n\n\n"]}
     
     if file_path.lower().endswith('.docx'):
-        content, objects = get_docx_data(file_path)
+        content = get_docx_data(file_path)
     else:
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = [l.strip() for l in f.readlines() if l.strip()]
-        objects = {}
-    return {"path": file_path.replace('\\', '/'), "content": content, "objects": objects}
+    return {"path": file_path.replace('\\', '/'), "content": content}
 
 def heal_text(lines):
     res = []
@@ -151,7 +155,7 @@ def heal_text(lines):
     return res
 
 def extract_id(text):
-    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+(?:\.\d+)+[a-zA-Z]?|\d+\.)(?:\s|$)', text, re.IGNORECASE)
+    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+\.\d+(?:\.\d+)*[a-zA-Z]?)(?:\s|$)', text, re.IGNORECASE)
     if m: return m.group(0).strip()
     return None
 
@@ -174,16 +178,23 @@ def berechne_diff_daten(lines_left, lines_right):
     lines_left = heal_text(lines_left)
     lines_right = heal_text(lines_right)
     
-    # autojunk=False verhindert das Überspringen wichtiger Code-Blöcke in sehr großen Dateien
-    sm = difflib.SequenceMatcher(None, lines_left, lines_right, autojunk=False)
+    sm = difflib.SequenceMatcher(None, lines_left, lines_right)
     
     buckets = collections.OrderedDict()
     current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
     buckets[current_id] = []
     
+    stats = {
+        "l_eq": 0, "l_rep": 0, "l_del": 0, "l_tot": 0,
+        "r_eq": 0, "r_rep": 0, "r_ins": 0, "r_tot": 0,
+        "img_eq": 0, "img_rep": 0, "img_del": 0, "img_ins": 0,
+        "has_reqs": False
+    }
+    
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == 'equal':
             for l, r in zip(lines_left[i1:i2], lines_right[j1:j2]):
+                stats['img_eq'] += len(re.findall(r'\[BILD:', l))
                 cid = extract_id(r) or extract_id(l)
                 if cid: 
                     current_id = cid
@@ -196,6 +207,17 @@ def berechne_diff_daten(lines_left, lines_right):
             for k in range(max(len(sub_l), len(sub_r))):
                 l = sub_l[k] if k < len(sub_l) else ""
                 r = sub_r[k] if k < len(sub_r) else ""
+                
+                if l and r:
+                    l_imgs = len(re.findall(r'\[BILD:', l))
+                    r_imgs = len(re.findall(r'\[BILD:', r))
+                    stats['img_rep'] += min(l_imgs, r_imgs)
+                    if r_imgs > l_imgs: stats['img_ins'] += (r_imgs - l_imgs)
+                    if l_imgs > r_imgs: stats['img_del'] += (l_imgs - r_imgs)
+                elif l:
+                    stats['img_del'] += len(re.findall(r'\[BILD:', l))
+                elif r:
+                    stats['img_ins'] += len(re.findall(r'\[BILD:', r))
                 
                 cid = extract_id(r) or extract_id(l)
                 if cid: 
@@ -212,6 +234,7 @@ def berechne_diff_daten(lines_left, lines_right):
                     
         elif op == 'delete':
             for l in lines_left[i1:i2]:
+                stats['img_del'] += len(re.findall(r'\[BILD:', l))
                 cid = extract_id(l)
                 if cid: 
                     current_id = cid
@@ -220,6 +243,7 @@ def berechne_diff_daten(lines_left, lines_right):
                 
         elif op == 'insert':
             for r in lines_right[j1:j2]:
+                stats['img_ins'] += len(re.findall(r'\[BILD:', r))
                 cid = extract_id(r)
                 if cid: 
                     current_id = cid
@@ -228,26 +252,16 @@ def berechne_diff_daten(lines_left, lines_right):
 
     left_ids = set()
     right_ids = set()
-    img_diffs = 0
-    
     for cid, items in buckets.items():
-        if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)":
-            if any(i['left'] for i in items): left_ids.add(cid)
-            if any(i['right'] for i in items): right_ids.add(cid)
-            
-        # Zähle veränderte Bilder transparent in der Statistik
-        for item in items:
-            if item['tag'] != 'equal':
-                img_l = len(re.findall(r'\[BILD:', item['left']))
-                img_r = len(re.findall(r'\[BILD:', item['right']))
-                img_diffs += max(img_l, img_r)
+        if cid == "HEADER (Deckblatt/Inhaltsverzeichnis)": continue
+        if any(i['left'] for i in items): left_ids.add(cid)
+        if any(i['right'] for i in items): right_ids.add(cid)
         
-    stats = {
-        "l_eq": 0, "l_rep": 0, "l_del": len(left_ids - right_ids), "l_tot": len(left_ids),
-        "r_eq": 0, "r_rep": 0, "r_ins": len(right_ids - left_ids), "r_tot": len(right_ids),
-        "img_diffs": img_diffs,
-        "has_reqs": len(left_ids) > 0 or len(right_ids) > 0
-    }
+    stats["l_del"] = len(left_ids - right_ids)
+    stats["l_tot"] = len(left_ids)
+    stats["r_ins"] = len(right_ids - left_ids)
+    stats["r_tot"] = len(right_ids)
+    stats["has_reqs"] = len(left_ids) > 0 or len(right_ids) > 0
     
     intersect = left_ids & right_ids
     for cid in intersect:
@@ -261,10 +275,12 @@ def berechne_diff_daten(lines_left, lines_right):
     block_id = 0
     for cid, items in buckets.items():
         if not items: continue
-        left_htmls, right_htmls = [], []
+        
+        left_htmls = []
+        right_htmls = []
         tag_set = set()
         
-        prefix = f"<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px;'>[{cid}]</div>" if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)" else ""
+        prefix = f"<div class='chapter-header' style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px;'>[{cid}]</div>" if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)" else ""
         
         for item in items:
             left_htmls.append(f"<div class='inner-line bg-{item['tag']}'>{item['left']}</div>" if item['left'] else "<div class='inner-line bg-empty'></div>")
@@ -301,7 +317,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             
             temp_dir = tempfile.gettempdir()
             save_path = os.path.join(temp_dir, f"delta_tmp_{side}.docx")
-            with open(save_path, 'wb') as f: f.write(file_data)
+            with open(save_path, 'wb') as f:
+                f.write(file_data)
                 
             if side == 'left':
                 START_FILE_LEFT = save_path; DISPLAY_NAME_LEFT = filename
@@ -320,22 +337,13 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 info_l = get_file_info(START_FILE_LEFT)
                 info_r = get_file_info(START_FILE_RIGHT)
                 diff, stats = berechne_diff_daten(info_l['content'], info_r['content'])
-                
-                # Zwingend Content-Length setzen, sonst droppen moderne Browser bei riesigen JSON-Paketen die Verbindung!
-                response_json = json.dumps({"diff": diff, "stats": stats}).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Content-Length', str(len(response_json)))
                 self.end_headers()
-                self.wfile.write(response_json)
+                self.wfile.write(json.dumps({"diff": diff, "stats": stats}).encode('utf-8'))
             except Exception as e:
-                traceback.print_exc()
-                error_json = json.dumps({"error": str(e)}).encode('utf-8')
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Content-Length', str(len(error_json)))
-                self.end_headers()
-                self.wfile.write(error_json)
+                self.send_response(500); self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
             return
             
         if parsed_url.path == '/api/jump':
@@ -345,10 +353,32 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             
             target_file = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
             success = jump_to_word_page(target_file, page)
-            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
             self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
             return
             
+        if parsed_url.path == '/media':
+            query = parse_qs(parsed_url.query)
+            side = query.get('side', [''])[0]
+            file_path_in_zip = query.get('file', [''])[0]
+            
+            docx_path = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
+            try:
+                with zipfile.ZipFile(docx_path, 'r') as z:
+                    data = z.read(file_path_in_zip)
+                    self.send_response(200)
+                    ext = file_path_in_zip.lower().split('.')[-1]
+                    content_types = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif'}
+                    self.send_header('Content-type', content_types.get(ext, 'application/octet-stream'))
+                    self.end_headers()
+                    self.wfile.write(data)
+            except Exception:
+                self.send_response(404); self.end_headers()
+            return
+
         if self.path == '/':
             self.send_response(200); self.send_header('Content-type', 'text/html; charset=utf-8'); self.end_headers()
             name_l = DISPLAY_NAME_LEFT if DISPLAY_NAME_LEFT else "Keine Datei (Links)"
@@ -382,7 +412,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 #svg-container { width: 100px; flex-shrink: 0; position: relative; background: var(--bg-panel); border-left: 1px solid #444; border-right: 1px solid #444; }
                 svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
                 
-                .bucket-block { background-color: #252526; border: 1px solid #444; border-radius: 4px; margin-bottom: 12px; padding: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);}
+                .bucket-block { background-color: #252526; border: 1px solid #444; border-radius: 4px; margin-bottom: 12px; padding: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: min-height 0.2s;}
                 .inner-line { padding: 2px 5px; margin-bottom: 3px; border-radius: 2px; min-height: 1.2em; word-wrap: break-word; font-family: 'Consolas', monospace;}
                 
                 .bg-insert { background-color: rgba(40, 167, 69, 0.2); border-left: 3px solid #28a745; }
@@ -392,23 +422,22 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .bg-empty { background-color: transparent; min-height: 1.2em; }
                 
                 .char-diff { background-color: rgba(0, 123, 255, 0.6); color: white; font-weight: bold; border-radius: 2px; padding: 0 2px; }
-                
-                .page-break-line { border-top: 1px dashed #dc3545; margin: 15px 0; position: relative; width: 100%; }
-                .page-break-line span { 
-                    background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; 
-                    border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px;
-                }
-                .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 9px; cursor: pointer; padding: 2px 4px;}
-                .jump-btn:hover { background: #fff; color: #dc3545; }
+                .inline-img { max-width: 90%; max-height: 300px; border: 2px dashed #007acc; padding: 5px; margin: 5px 0; background: #2d2d2d; border-radius: 4px; display: block; box-sizing: border-box;}
+                .img-changed { border: 3px solid #007bff; box-shadow: 0 0 8px rgba(0,123,255,0.6); }
                 
                 .editor-container.view-delta .tag-equal { display: none !important; }
-                .editor-container.view-equal .tag-replace, .editor-container.view-equal .tag-insert, .editor-container.view-equal .tag-delete { display: none !important; }
-                
                 #loading-screen { position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#007acc; font-size:24px; font-weight:bold; z-index: 1000; text-align: center; }
+                
+                @media print { 
+                    #header-container, #svg-container { display: none !important; } 
+                    body, #workspace { overflow: visible !important; height: auto !important; } 
+                    .editor-container { overflow: visible !important; border: none; padding:0; width:48%; float:left; margin-right:2%;} 
+                    .bucket-block { page-break-inside: avoid; border: 1px solid #ccc;}
+                }
             </style>
         </head>
         <body>
-            <div id="loading-screen">⏳ Lade Enterprise Engine... Bitte warten.</div>
+            <div id="loading-screen">⏳ Analysiere Dokumente... Bitte warten.</div>
 
             <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
@@ -418,29 +447,41 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 
                 <div class="center-panel">
                     <div style="margin-bottom: 5px; font-weight:bold;">APP_VERSION</div>
-                    <div id="req-mode-badge" style="display:none; background:#28a745; color:white; padding:2px 4px; border-radius:3px; margin-bottom: 5px; font-weight:bold;">✅ SEMANTIC SYNC</div>
+                    <div id="req-mode-badge" style="display:none; background:#28a745; color:white; padding:2px 4px; border-radius:3px; margin-bottom: 5px; font-weight:bold;">✅ ALIGNED SYNC</div>
                     
                     <div id="stats-panel" style="display:none; width: 100%; background: #1e1e1e; border-radius: 4px; padding: 6px; box-sizing: border-box; text-align: left; margin-bottom: 5px; border: 1px solid #444;">
-                        <div style="color:#d4d4d4; font-size:11px; margin-bottom:4px; text-align:center; border-bottom:1px solid #444; padding-bottom:3px;"><b>Statistik</b></div>
+                        <div style="color:#d4d4d4; font-size:11px; margin-bottom:4px; text-align:center; border-bottom:1px solid #444; padding-bottom:3px;"><b>Statistik (Kapitel/IDs)</b></div>
                         <div style="display:flex; justify-content: space-between; font-size: 9px; line-height: 1.4;">
                             <div style="width: 48%;">
                                 <u style="color:#9cdcfe">Links</u><br>Gleich: <span id="l-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
-                                Geändert: <span id="l-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Gelöscht: <span id="l-del" style="float:right; font-weight:bold; color:#dc3545;">0</span>
+                                Geändert: <span id="l-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Gelöscht: <span id="l-del" style="float:right; font-weight:bold; color:#dc3545;">0</span><br>
+                                <div style="border-top: 1px solid #444; margin-top: 2px; padding-top: 2px;">Total: <span id="l-tot" style="float:right;">0</span></div>
                             </div>
                             <div style="border-left: 1px solid #444; padding-left: 4px; width: 48%;">
                                 <u style="color:#9cdcfe">Rechts</u><br>Gleich: <span id="r-eq" style="float:right; font-weight:bold; color:#888;">0</span><br>
-                                Geändert: <span id="r-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Neu: <span id="r-ins" style="float:right; font-weight:bold; color:#28a745;">0</span>
+                                Geändert: <span id="r-rep" style="float:right; font-weight:bold; color:#007bff;">0</span><br>Neu: <span id="r-ins" style="float:right; font-weight:bold; color:#28a745;">0</span><br>
+                                <div style="border-top: 1px solid #444; margin-top: 2px; padding-top: 2px;">Total: <span id="r-tot" style="float:right;">0</span></div>
                             </div>
                         </div>
-                        <div style="border-top: 1px solid #444; margin-top: 4px; padding-top: 4px; text-align: center; font-size: 9px; font-weight: bold; color: #ff9800;">
-                            Bilder geändert: <span id="img-diffs">0</span>
+                        
+                        <div style="border-top: 1px solid #444; margin-top: 6px; padding-top: 4px;">
+                            <div style="color:#d4d4d4; font-size:11px; margin-bottom:4px; text-align:center;"><b>Bilder / Medien</b></div>
+                            <div style="display:flex; justify-content: space-between; font-size: 9px; line-height: 1.4;">
+                                <div style="width: 48%;">Geändert: <span id="img-rep" style="float:right; font-weight:bold; color:#007bff;">0</span></div>
+                                <div style="border-left: 1px solid #444; padding-left: 4px; width: 48%;">Neu: <span id="img-ins" style="float:right; font-weight:bold; color:#28a745;">0</span></div>
+                            </div>
                         </div>
-                    </div>
 
-                    <div style="margin-top: 5px; text-align: center; font-size: 11px; background: #1e1e1e; border: 1px solid #444; padding: 4px; border-radius: 3px; width: 100%; box-sizing: border-box;">
-                        <b style="color: #9cdcfe;">MS Word Live-Sync</b><br>
-                        <label style="cursor:pointer;"><input type="checkbox" id="sync-left" onchange="doLiveSync()"> Links</label> &nbsp;
-                        <label style="cursor:pointer;"><input type="checkbox" id="sync-right" onchange="doLiveSync()"> Rechts</label>
+                        <div style="margin-top: 6px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
+                            <b style="color: #9cdcfe;">MS Word Live-Sync</b><br>
+                            <label style="cursor:pointer;"><input type="checkbox" id="sync-left" onchange="doLiveSync()"> Links</label> &nbsp;
+                            <label style="cursor:pointer;"><input type="checkbox" id="sync-right" onchange="doLiveSync()"> Rechts</label>
+                        </div>
+
+                        <div style="margin-top: 6px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
+                            <label style="cursor: pointer; color: #d4d4d4; font-size: 10px; margin-right: 5px;"><input type="checkbox" id="chk-show-lines" checked onchange="drawLines()"> Linien EIN</label>
+                            <label style="cursor: pointer; color: #d4d4d4; font-size: 10px;"><input type="checkbox" id="chk-equal-lines" checked onchange="drawLines()"> Graue (Gleich)</label>
+                        </div>
                     </div>
 
                     <button class="word-btn" onclick="window.print()">🖨️ PDF Report (Drucken)</button>
@@ -453,30 +494,44 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </div>
 
             <div id="workspace" style="visibility: hidden;">
-                <div id="left-editor" class="editor-container" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, 'left')"></div>
+                <div id="left-editor" class="editor-container"></div>
                 <div id="svg-container"><svg id="lines-svg"></svg></div>
-                <div id="right-editor" class="editor-container" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, 'right')"></div>
+                <div id="right-editor" class="editor-container"></div>
             </div>
 
             <script>
+                window.onerror = function(msg, url, line) {
+                    const ws = document.getElementById('workspace');
+                    if (ws) {
+                        ws.style.visibility = 'visible';
+                        ws.innerHTML = `<div style="color:#dc3545; padding:20px; font-weight:bold;">Frontend-Absturz: ${msg} (Zeile ${line})</div>`;
+                    }
+                };
+
                 let diffData = []; let statsData = {};
                 let syncTimer = null;
                 let lastPageL = -1; let lastPageR = -1;
                 
                 window.onload = function() {
-                    fetch('/api/diff_data').then(res => res.json()).then(data => {
-                        if (data.error) { 
-                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Interner Python-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`; 
-                            return; 
-                        }
-                        diffData = data.diff; statsData = data.stats;
-                        document.getElementById('loading-screen').style.display = 'none';
-                        document.getElementById('header-container').style.visibility = 'visible';
-                        document.getElementById('workspace').style.visibility = 'visible';
-                        renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
-                    }).catch(err => { 
-                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Browser-Verbindungsfehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">Verbindung zum lokalen Server abgebrochen. Lade die Seite neu. (${err})</span>`; 
-                    });
+                    try {
+                        fetch('/api/diff_data').then(res => res.json()).then(data => {
+                            if (data.error) {
+                                document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Backend-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`;
+                                return;
+                            }
+                            diffData = data.diff; statsData = data.stats;
+                            
+                            document.getElementById('loading-screen').style.display = 'none';
+                            document.getElementById('header-container').style.visibility = 'visible';
+                            document.getElementById('workspace').style.visibility = 'visible';
+                            
+                            renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
+                        }).catch(err => {
+                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Netzwerk-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`;
+                        });
+                    } catch(e) {
+                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ JS-Ladefehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${e}</span>`;
+                    }
                 };
 
                 const svgContainer = document.getElementById('svg-container');
@@ -497,7 +552,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function jumpToPage(side, page) {
                     fetch(`/api/jump?side=${side}&page=${page}`).then(res => res.json()).then(data => {
-                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen (Nutzt du LibreOffice?).");
+                        if(!data.success) console.warn("MS Word Fernsteuerung blockiert. Siehe Terminal-Output.");
                     });
                 }
 
@@ -525,7 +580,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             let p = getPage('right-editor');
                             if(p && p !== lastPageR) { lastPageR = p; fetch(`/api/jump?side=right&page=${p}`); }
                         }
-                    }, 800);
+                    }, 800); // 800ms debounce
                 }
 
                 function changeView(side) {
@@ -536,72 +591,129 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     setTimeout(drawLines, 50); 
                 }
 
+                function safeSetText(id, text) {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = text;
+                }
+                
                 function renderSpecialTags(htmlStr, side) {
-                    let res = htmlStr.replace(/\\[BILD:\s*(.*?)\s*\|\s*HASH:.*?\\]/g, `<div style="border:1px solid #007acc; padding:4px; margin:4px 0; background:#2d2d2d; color:#9cdcfe; font-size:10px; border-radius:3px;">🖼️ BILD-OBJEKT [$1]</div>`);
-                    res = res.replace(/\\[SEITENUMBRUCH:\s*(\d+)\\]/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
-                    return res;
+                    if (!htmlStr) return '';
+                    return htmlStr.replace(/\[BILD:(.*?)\|HASH:(.*?)\]/g, function(match, pathPart, hashPart) {
+                        let isChanged = hashPart.includes("char-diff");
+                        let path = pathPart.replace(/<[^>]*>?/gm, '').trim(); 
+                        let badge = isChanged ? `<div style="background:#007bff; color:white; font-size:10px; padding:2px 5px; display:inline-block; border-radius:3px; margin-bottom:4px; font-weight:bold; box-shadow: 0 1px 3px rgba(0,0,0,0.5);">🔄 BILD GEÄNDERT</div><br>` : '';
+                        let imgClass = isChanged ? 'inline-img img-changed' : 'inline-img';
+                        return `<div style="margin-top:10px; margin-bottom:10px;">${badge}<img src="/media?side=${side}&file=${path}" class="${imgClass}" alt="Bild" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Bild fehlt: ${path}</div>'"></div>`;
+                    });
                 }
 
                 function renderEditors(leftEditor, rightEditor) {
-                    if (statsData.has_reqs) {
-                        document.getElementById('req-mode-badge').style.display = 'block';
-                        document.getElementById('stats-panel').style.display = 'block';
-                        document.getElementById('l-eq').textContent = statsData.l_eq;
-                        document.getElementById('l-rep').textContent = statsData.l_rep;
-                        document.getElementById('l-del').textContent = statsData.l_del;
-                        document.getElementById('r-eq').textContent = statsData.r_eq;
-                        document.getElementById('r-rep').textContent = statsData.r_rep;
-                        document.getElementById('r-ins').textContent = statsData.r_ins;
-                        document.getElementById('img-diffs').textContent = statsData.img_diffs;
+                    try {
+                        if (statsData.has_reqs) {
+                            const badge = document.getElementById('req-mode-badge');
+                            const panel = document.getElementById('stats-panel');
+                            if (badge) badge.style.display = 'block';
+                            if (panel) panel.style.display = 'block';
+                            
+                            safeSetText('l-eq', statsData.l_eq); safeSetText('l-rep', statsData.l_rep);
+                            safeSetText('l-del', statsData.l_del); safeSetText('l-tot', statsData.l_tot);
+                            
+                            safeSetText('r-eq', statsData.r_eq); safeSetText('r-rep', statsData.r_rep);
+                            safeSetText('r-ins', statsData.r_ins); safeSetText('r-tot', statsData.r_tot);
+                            
+                            safeSetText('img-rep', statsData.img_rep); safeSetText('img-ins', statsData.img_ins);
+                        }
+
+                        if(diffData && diffData.length > 0) {
+                            diffData.forEach(block => {
+                                const lDiv = document.createElement('div');
+                                lDiv.id = `l-${block.id}`; lDiv.className = `bucket-block tag-${block.tag}`;
+                                lDiv.innerHTML = renderSpecialTags(block.left, 'left');
+                                leftEditor.appendChild(lDiv);
+
+                                const rDiv = document.createElement('div');
+                                rDiv.id = `r-${block.id}`; rDiv.className = `bucket-block tag-${block.tag}`;
+                                rDiv.innerHTML = renderSpecialTags(block.right, 'right');
+                                rightEditor.appendChild(rDiv);
+                            });
+                            
+                            diffData.forEach(block => {
+                                const lEl = document.getElementById(`l-${block.id}`);
+                                const rEl = document.getElementById(`r-${block.id}`);
+                                if(lEl && rEl) {
+                                    const maxH = Math.max(lEl.offsetHeight, rEl.offsetHeight);
+                                    lEl.style.minHeight = maxH + 'px';
+                                    rEl.style.minHeight = maxH + 'px';
+                                }
+                            });
+                        } else {
+                            leftEditor.innerHTML = "<div style='padding:20px; color:#888;'>Keine extrahierbaren Texte gefunden. Bitte lade eine DOCX hoch.</div>";
+                        }
+                        
+                        leftEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
+                        rightEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
+                        setTimeout(drawLines, 300);
+                    } catch(e) {
+                        alert("Fehler beim Rendern der Editoren: " + e);
                     }
-
-                    diffData.forEach(block => {
-                        const lDiv = document.createElement('div');
-                        lDiv.id = `l-${block.id}`; lDiv.className = `bucket-block tag-${block.tag}`;
-                        lDiv.innerHTML = renderSpecialTags(block.left, 'left') || '';
-                        leftEditor.appendChild(lDiv);
-
-                        const rDiv = document.createElement('div');
-                        rDiv.id = `r-${block.id}`; rDiv.className = `bucket-block tag-${block.tag}`;
-                        rDiv.innerHTML = renderSpecialTags(block.right, 'right') || '';
-                        rightEditor.appendChild(rDiv);
-                    });
-                    
-                    leftEditor.innerHTML += '<div class="drag-overlay">📥 HIER ABLEGEN</div>';
-                    rightEditor.innerHTML += '<div class="drag-overlay">📥 HIER ABLEGEN</div>';
-                    setTimeout(drawLines, 200);
                 }
 
                 function drawLines() {
-                    const svg = document.getElementById('lines-svg');
-                    const leftEditor = document.getElementById('left-editor');
-                    const rightEditor = document.getElementById('right-editor');
-                    if (!svg || !leftEditor || !rightEditor) return;
-                    
-                    svg.innerHTML = '';
-                    const svgWidth = svgContainer.clientWidth;
-                    const lScroll = leftEditor.scrollTop;
-                    const rScroll = rightEditor.scrollTop;
-
-                    diffData.forEach(block => {
-                        const lEl = document.getElementById(`l-${block.id}`);
-                        const rEl = document.getElementById(`r-${block.id}`);
-                        if (!lEl || !rEl || lEl.offsetParent === null || rEl.offsetParent === null) return;
+                    try {
+                        const svg = document.getElementById('lines-svg');
+                        const leftEditor = document.getElementById('left-editor');
+                        const rightEditor = document.getElementById('right-editor');
+                        const container = document.getElementById('svg-container');
                         
-                        const lY = lEl.offsetTop + (lEl.offsetHeight / 2) - lScroll;
-                        const rY = rEl.offsetTop + (rEl.offsetHeight / 2) - rScroll;
+                        if (!svg || !leftEditor || !rightEditor || !container) return;
                         
-                        let color = block.tag === 'insert' ? '#28a745' : block.tag === 'delete' ? '#dc3545' : block.tag === 'equal' ? '#666666' : '#007bff';
-                        let opacity = block.tag === 'equal' ? '0.3' : '0.6';
-                        let strokeWidth = block.tag === 'equal' ? '1' : '2';
+                        while (svg.firstChild) {
+                            svg.removeChild(svg.firstChild);
+                        }
+                        
+                        const chkMaster = document.getElementById('chk-show-lines');
+                        const chkEqual = document.getElementById('chk-equal-lines');
+                        const showLines = chkMaster ? chkMaster.checked : true;
+                        const showEqual = chkEqual ? chkEqual.checked : true;
 
-                        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                        path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
-                        path.setAttribute('fill', 'none'); path.setAttribute('stroke', color);
-                        path.setAttribute('stroke-width', strokeWidth); path.setAttribute('opacity', opacity);
-                        svg.appendChild(path);
-                    });
-                }
+                        if (!showLines) return;
+                        
+                        const svgWidth = container.clientWidth || 100;
+                        const lScroll = leftEditor.scrollTop;
+                        const rScroll = rightEditor.scrollTop;
+
+                        diffData.forEach(block => {
+                            if (block.tag === 'equal' && !showEqual) return;
+                            
+                            const lEl = document.getElementById('l-' + block.id);
+                            const rEl = document.getElementById('r-' + block.id);
+                            
+                            if (!lEl || !rEl || lEl.offsetParent === null || rEl.offsetParent === null) return;
+                            
+                            const lY = lEl.offsetTop + 18 - lScroll;
+                            const rY = rEl.offsetTop + 18 - rScroll;
+                            
+                            let color = '#007bff';
+                            let opacity = '0.8';
+                            let strokeWidth = '2.5';
+                            
+                            if (block.tag === 'insert') { color = '#28a745'; }
+                            else if (block.tag === 'delete') { color = '#dc3545'; }
+                            else if (block.tag === 'equal') { color = '#666666'; opacity = '0.3'; strokeWidth = '1.5'; }
+
+                            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                            path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
+                            path.setAttribute('fill', 'none'); 
+                            path.setAttribute('stroke', color);
+                            path.setAttribute('stroke-width', strokeWidth); 
+                            path.setAttribute('opacity', opacity);
+                            svg.appendChild(path);
+                        });
+                    } catch(e) {
+                        console.error("Fehler beim Zeichnen der Linien:", e);
+                    }
+               
+                }           
 
                 let isSyncingLeft = false; let isSyncingRight = false;
                 document.getElementById('left-editor')?.addEventListener('scroll', function() {
@@ -649,5 +761,8 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=start_fallback_server, daemon=True)
     server_thread.start()
     
-    try: threading.Event().wait(1)
-    except KeyboardInterrupt: pass
+    try:
+        while True:
+            threading.Event().wait(1)
+    except KeyboardInterrupt: 
+        pass
