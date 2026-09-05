@@ -13,7 +13,7 @@ import html
 import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v29.0 (Visual Connect & COM-Sync Engine)"
+APP_VERSION = "v30.0 (Anti-Ghost & Page-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -21,47 +21,52 @@ DISPLAY_NAME_LEFT = ""
 DISPLAY_NAME_RIGHT = ""
 
 # ==========================================
-# MS WORD COM-STEUERUNG (Robustes Live-Scrolling)
+# MS WORD COM-STEUERUNG (Smart Sync)
 # ==========================================
-def jump_to_word_page(file_path, page_num):
-    if not file_path or not os.path.exists(file_path):
+def jump_to_word_page(side, page_num):
+    target_name = DISPLAY_NAME_LEFT if side == 'left' else DISPLAY_NAME_RIGHT
+    fallback_path = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
+    
+    if not target_name:
         return False
+        
     try:
         import win32com.client
     except ImportError:
-        print("FEHLER: 'pywin32' fehlt!")
+        print("FEHLER: 'pywin32' fehlt! Bitte 'pip install pywin32' ausführen.")
         return False
         
     try:
         word = win32com.client.Dispatch("Word.Application")
         word.Visible = True 
         
-        abs_path = os.path.abspath(file_path)
         doc = None
         for d in word.Documents:
-            if d.FullName.lower() == abs_path.lower():
+            if target_name.lower() in d.Name.lower() or d.Name.lower() in target_name.lower():
                 doc = d
                 break
+                
+        if not doc and fallback_path and os.path.exists(fallback_path):
+            doc = word.Documents.Open(os.path.abspath(fallback_path))
+            
         if not doc:
-            doc = word.Documents.Open(abs_path)
+            return False
             
         doc.Activate()
         word.Activate()
         
-        # 1 = wdGoToPage, 1 = wdGoToAbsolute
-        rng = doc.GoTo(1, 1, int(page_num))
-        rng.Select()
-        # Zwingt den aktiven Word-Bildschirm, der Selektion zu folgen
-        word.ActiveWindow.ScrollIntoView(rng)
+        target_range = doc.GoTo(1, 1, int(page_num))
+        target_range.Select()
+        word.ActiveWindow.ScrollIntoView(target_range)
         
-        print(f"-> Erfolgreich in Word auf Seite {page_num} gesprungen!")
+        print(f"-> Live-Sync: In '{doc.Name}' auf Seite {page_num} gescrollt!")
         return True
     except Exception as e:
-        print(f"WORD-SCROLL FEHLER: {e}")
+        print(f"WORD-BLOCKADE beim Scrollen: {e}")
         return False
 
 # ==========================================
-# PURE PYTHON XML PARSER (Namespace-Agnostic + Images + Paging)
+# PURE PYTHON XML PARSER 
 # ==========================================
 def get_docx_data(file_path):
     content = []
@@ -95,8 +100,8 @@ def get_docx_data(file_path):
                     if p.tag.endswith('}p'):
                         para_text = ""
                         for node in p.iter():
-                            # Stellt sicher, dass Seitenumbrüche wieder gezählt werden
-                            if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and node.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type') == 'page'):
+                            # Stellt die Seitenumbruch-Erkennung wieder her für das Sync-Scrolling
+                            if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and any(v == 'page' for k,v in node.attrib.items())):
                                 page_count[0] += 1
                                 para_text += f"\n[SEITENUMBRUCH:{page_count[0]}]\n"
                             elif node.tag.endswith('}t') and node.text:
@@ -114,10 +119,8 @@ def get_docx_data(file_path):
                                     img_hash = objects.get(img_path, "NO_HASH")
                                     para_text += f"\n[BILD:{img_path}|HASH:{img_hash}]\n"
                         
-                        # Trennt Seitenumbrüche in eigene Zeilen auf
-                        for txt in para_text.split('\n'):
-                            clean_txt = txt.strip()
-                            if clean_txt: content.append(clean_txt)
+                        txt = para_text.strip()
+                        if txt: content.append(txt)
                         
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
@@ -165,7 +168,7 @@ def heal_text(lines):
     return res
 
 def extract_id(text):
-    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+\.\d+(?:\.\d+)*[a-zA-Z]?)(?:\s|$)', text, re.IGNORECASE)
+    m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+(?:\.\d+)*[a-zA-Z]?|\d+\.)(?:\s|$)', text, re.IGNORECASE)
     if m: return m.group(0).strip()
     return None
 
@@ -188,7 +191,8 @@ def berechne_diff_daten(lines_left, lines_right):
     lines_left = heal_text(lines_left)
     lines_right = heal_text(lines_right)
     
-    sm = difflib.SequenceMatcher(None, lines_left, lines_right)
+    # autojunk=False verhindert die Geisterunterschiede bei großen Dokumenten!
+    sm = difflib.SequenceMatcher(None, lines_left, lines_right, autojunk=False)
     
     buckets = collections.OrderedDict()
     current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
@@ -347,13 +351,20 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 info_l = get_file_info(START_FILE_LEFT)
                 info_r = get_file_info(START_FILE_RIGHT)
                 diff, stats = berechne_diff_daten(info_l['content'], info_r['content'])
+                
+                response_json = json.dumps({"diff": diff, "stats": stats}).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(response_json)))
                 self.end_headers()
-                self.wfile.write(json.dumps({"diff": diff, "stats": stats}).encode('utf-8'))
+                self.wfile.write(response_json)
             except Exception as e:
-                self.send_response(500); self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                error_json = json.dumps({"error": str(e)}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(error_json)))
+                self.end_headers()
+                self.wfile.write(error_json)
             return
             
         if parsed_url.path == '/api/jump':
@@ -361,8 +372,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             side = query.get('side', [''])[0]
             page = query.get('page', ['1'])[0]
             
-            target_file = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
-            success = jump_to_word_page(target_file, page)
+            success = jump_to_word_page(side, page)
             
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
@@ -399,8 +409,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html lang="de">
         <head>
-            <meta charset="utf-8">
-            <title>Advanced Delta Tool</title>
+            <meta charset="utf-8"><title>Advanced Delta Tool</title>
             <style>
                 :root { --bg-dark: #1e1e1e; --bg-panel: #252526; --text-main: #d4d4d4; }
                 body { margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; background: var(--bg-dark); color: var(--text-main); overflow: hidden; }
@@ -409,7 +418,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .pane-header.left { border-right: 1px solid #444; }
                 .header-title { font-weight: bold; color: #9cdcfe; font-size: 15px; max-width: 350px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #1e1e1e; padding: 4px 10px; border-radius: 4px; border: 1px solid #555;}
                 .view-select { background: #007acc; border: 1px solid #005f9e; color: white; padding: 5px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; cursor: pointer; outline: none;}
-                .view-select:hover { background: #005f9e; }
                 .word-btn { background: #107c41; margin-top: 5px; width: 100%; border:none; color:white; padding:4px; font-size:11px; cursor:pointer; border-radius: 3px; font-weight:bold;}
                 .center-panel { width: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg-panel); padding: 5px 10px; font-size: 10px; color: #888; border-left: 1px solid #444; border-right: 1px solid #444; box-sizing: border-box;}
                 #workspace { display: flex; flex: 1; overflow: hidden; position: relative; }
@@ -434,7 +442,10 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .img-changed { border: 3px solid #007bff; box-shadow: 0 0 8px rgba(0,123,255,0.6); }
                 
                 .page-break-line { border-top: 1px dashed #dc3545; margin: 15px 0; position: relative; width: 100%; }
-                .page-break-line span { background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px; }
+                .page-break-line span { 
+                    background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; 
+                    border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px;
+                }
                 .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 9px; cursor: pointer; padding: 2px 4px;}
                 .jump-btn:hover { background: #fff; color: #dc3545; }
                 
@@ -450,7 +461,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <div id="loading-screen">⏳ Analysiere Dokumente... Bitte warten.</div>
+            <div id="loading-screen">⏳ Lade Semantic Engine...</div>
 
             <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
@@ -513,14 +524,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </div>
 
             <script>
-                window.onerror = function(msg, url, line) {
-                    const ws = document.getElementById('workspace');
-                    if (ws) {
-                        ws.style.visibility = 'visible';
-                        ws.innerHTML = `<div style="color:#dc3545; padding:20px; font-weight:bold;">Frontend-Absturz: ${msg} (Zeile ${line})</div>`;
-                    }
-                };
-
                 let diffData = []; let statsData = {};
                 let syncTimer = null;
                 let lastPageL = -1; let lastPageR = -1;
@@ -565,7 +568,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function jumpToPage(side, page) {
                     fetch(`/api/jump?side=${side}&page=${page}`).then(res => res.json()).then(data => {
-                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen. Siehe Python Terminal.");
+                        if(!data.success) console.warn("MS Word Fernsteuerung blockiert. Siehe Terminal-Output.");
                     });
                 }
 
@@ -587,13 +590,13 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     syncTimer = setTimeout(() => {
                         if(document.getElementById('sync-left').checked) {
                             let p = getPage('left-editor');
-                            if(p && p !== lastPageL) { lastPageL = p; fetch(`/api/jump?side=left&page=${p}`); }
+                            if(p && p !== lastPageL) { lastPageL = p; jumpToPage('left', p); }
                         }
                         if(document.getElementById('sync-right').checked) {
                             let p = getPage('right-editor');
-                            if(p && p !== lastPageR) { lastPageR = p; fetch(`/api/jump?side=right&page=${p}`); }
+                            if(p && p !== lastPageR) { lastPageR = p; jumpToPage('right', p); }
                         }
-                    }, 800); // 800ms debounce
+                    }, 800);
                 }
 
                 function changeView(side) {
@@ -603,21 +606,22 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     if (val !== 'all') editor.classList.add('view-' + val);
                     setTimeout(drawLines, 50); 
                 }
+
+                function safeSetText(id, text) {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = text;
+                }
                 
                 function renderSpecialTags(htmlStr, side) {
                     if (!htmlStr) return '';
-                    
-                    // Rendert Bilder
                     let res = htmlStr.replace(/\[BILD:(.*?)\|HASH:(.*?)\]/g, function(match, pathPart, hashPart) {
                         let isChanged = hashPart.includes("char-diff");
                         let path = pathPart.replace(/<[^>]*>?/gm, '').trim(); 
-                        let badge = isChanged ? `<div style="background:#007bff; color:white; font-size:10px; padding:2px 5px; display:inline-block; border-radius:3px; margin-bottom:4px; font-weight:bold;">🔄 BILD GEÄNDERT</div><br>` : '';
+                        let badge = isChanged ? `<div style="background:#007bff; color:white; font-size:10px; padding:2px 5px; display:inline-block; border-radius:3px; margin-bottom:4px; font-weight:bold; box-shadow: 0 1px 3px rgba(0,0,0,0.5);">🔄 BILD GEÄNDERT</div><br>` : '';
                         let imgClass = isChanged ? 'inline-img img-changed' : 'inline-img';
                         return `<div style="margin-top:10px; margin-bottom:10px;">${badge}<img src="/media?side=${side}&file=${path}" class="${imgClass}" alt="Bild" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Bild fehlt: ${path}</div>'"></div>`;
                     });
-                    
-                    // Rendert rote Seitenumbrüche OHNE <span class="char-diff"> Störungen
-                    res = res.replace(/(?:<[^>]+>)*\[SEITENUMBRUCH:(\d+)\](?:<[^>]+>)*/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
+                    res = res.replace(/\\[SEITENUMBRUCH:\s*(\d+)\\]/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
                     return res;
                 }
 
@@ -629,11 +633,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             if (badge) badge.style.display = 'block';
                             if (panel) panel.style.display = 'block';
                             
-                            const safeSetText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
                             safeSetText('l-eq', statsData.l_eq); safeSetText('l-rep', statsData.l_rep);
                             safeSetText('l-del', statsData.l_del); safeSetText('l-tot', statsData.l_tot);
+                            
                             safeSetText('r-eq', statsData.r_eq); safeSetText('r-rep', statsData.r_rep);
                             safeSetText('r-ins', statsData.r_ins); safeSetText('r-tot', statsData.r_tot);
+                            
                             safeSetText('img-rep', statsData.img_rep); safeSetText('img-ins', statsData.img_ins);
                         }
 
@@ -659,8 +664,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                     rEl.style.minHeight = maxH + 'px';
                                 }
                             });
-                        } else {
-                            leftEditor.innerHTML = "<div style='padding:20px; color:#888;'>Keine Texte extrahierbar.</div>";
                         }
                         
                         leftEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
@@ -680,9 +683,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         
                         if (!svg || !leftEditor || !rightEditor || !container) return;
                         
-                        while (svg.firstChild) {
-                            svg.removeChild(svg.firstChild);
-                        }
+                        while (svg.firstChild) { svg.removeChild(svg.firstChild); }
                         
                         const chkMaster = document.getElementById('chk-show-lines');
                         const chkEqual = document.getElementById('chk-equal-lines');
@@ -706,26 +707,18 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             const lY = lEl.offsetTop + 18 - lScroll;
                             const rY = rEl.offsetTop + 18 - rScroll;
                             
-                            let color = '#007bff';
-                            let opacity = '0.8';
-                            let strokeWidth = '2.5';
-                            
+                            let color = '#007bff'; let opacity = '0.8'; let strokeWidth = '2.5';
                             if (block.tag === 'insert') { color = '#28a745'; }
                             else if (block.tag === 'delete') { color = '#dc3545'; }
                             else if (block.tag === 'equal') { color = '#666666'; opacity = '0.3'; strokeWidth = '1.5'; }
 
                             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                             path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
-                            path.setAttribute('fill', 'none'); 
-                            path.setAttribute('stroke', color);
-                            path.setAttribute('stroke-width', strokeWidth); 
-                            path.setAttribute('opacity', opacity);
+                            path.setAttribute('fill', 'none'); path.setAttribute('stroke', color);
+                            path.setAttribute('stroke-width', strokeWidth); path.setAttribute('opacity', opacity);
                             svg.appendChild(path);
                         });
-                    } catch(e) {
-                        console.error("Fehler beim Zeichnen der Linien:", e);
-                    }
-               
+                    } catch(e) {}
                 }           
 
                 let isSyncingLeft = false; let isSyncingRight = false;
