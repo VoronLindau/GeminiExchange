@@ -13,7 +13,7 @@ import html
 import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v30.0 (Anti-Ghost & Page-Sync Engine)"
+APP_VERSION = "v31.0 (Smart Filter & Page-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -100,7 +100,6 @@ def get_docx_data(file_path):
                     if p.tag.endswith('}p'):
                         para_text = ""
                         for node in p.iter():
-                            # Stellt die Seitenumbruch-Erkennung wieder her für das Sync-Scrolling
                             if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and any(v == 'page' for k,v in node.attrib.items())):
                                 page_count[0] += 1
                                 para_text += f"\n[SEITENUMBRUCH:{page_count[0]}]\n"
@@ -172,6 +171,11 @@ def extract_id(text):
     if m: return m.group(0).strip()
     return None
 
+def clean_text_for_diff(text):
+    """Wascht Seitenumbrüche und leere Zeilen für die reine Text-Mathematik heraus"""
+    t = re.sub(r'\[SEITENUMBRUCH:\d+\]', '', text)
+    return re.sub(r'\s+', ' ', t).strip()
+
 def highlight_inline(str_l, str_r):
     if len(str_l) > 3000 or len(str_r) > 3000:
         return f"<span class='char-diff'>{html.escape(str_l)}</span>", f"<span class='char-diff'>{html.escape(str_r)}</span>"
@@ -187,12 +191,18 @@ def highlight_inline(str_l, str_r):
             if n1 != n2: right_out += f"<span class='char-diff'>{html.escape(str_r[n1:n2])}</span>"
     return left_out, right_out
 
-def berechne_diff_daten(lines_left, lines_right):
+def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
     lines_left = heal_text(lines_left)
     lines_right = heal_text(lines_right)
     
-    # autojunk=False verhindert die Geisterunterschiede bei großen Dokumenten!
-    sm = difflib.SequenceMatcher(None, lines_left, lines_right, autojunk=False)
+    if ignore_breaks:
+        clean_l_arr = [clean_text_for_diff(l) for l in lines_left]
+        clean_r_arr = [clean_text_for_diff(r) for r in lines_right]
+    else:
+        clean_l_arr = lines_left
+        clean_r_arr = lines_right
+
+    sm = difflib.SequenceMatcher(None, clean_l_arr, clean_r_arr, autojunk=False)
     
     buckets = collections.OrderedDict()
     current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
@@ -222,47 +232,68 @@ def berechne_diff_daten(lines_left, lines_right):
                 l = sub_l[k] if k < len(sub_l) else ""
                 r = sub_r[k] if k < len(sub_r) else ""
                 
-                if l and r:
-                    l_imgs = len(re.findall(r'\[BILD:', l))
-                    r_imgs = len(re.findall(r'\[BILD:', r))
-                    stats['img_rep'] += min(l_imgs, r_imgs)
-                    if r_imgs > l_imgs: stats['img_ins'] += (r_imgs - l_imgs)
-                    if l_imgs > r_imgs: stats['img_del'] += (l_imgs - r_imgs)
-                elif l:
-                    stats['img_del'] += len(re.findall(r'\[BILD:', l))
-                elif r:
-                    stats['img_ins'] += len(re.findall(r'\[BILD:', r))
+                c_l = clean_text_for_diff(l) if ignore_breaks else l
+                c_r = clean_text_for_diff(r) if ignore_breaks else r
                 
                 cid = extract_id(r) or extract_id(l)
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                 
+                # Wenn ignorieren aktiv ist und die Zeilen bereinigt identisch sind:
+                if ignore_breaks and c_l == c_r:
+                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': html.escape(r)})
+                    continue
+
                 if l and r:
+                    l_imgs = len(re.findall(r'\[BILD:', l))
+                    r_imgs = len(re.findall(r'\[BILD:', r))
+                    stats['img_rep'] += min(l_imgs, r_imgs)
+                    if r_imgs > l_imgs: stats['img_ins'] += (r_imgs - l_imgs)
+                    if l_imgs > r_imgs: stats['img_del'] += (l_imgs - r_imgs)
+                    
                     l_out, r_out = highlight_inline(l, r)
                     buckets[current_id].append({'tag': 'replace', 'left': l_out, 'right': r_out})
                 elif l:
-                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
+                    if ignore_breaks and not c_l:
+                        buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': ""})
+                    else:
+                        stats['img_del'] += len(re.findall(r'\[BILD:', l))
+                        buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
                 elif r:
-                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+                    if ignore_breaks and not c_r:
+                        buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(r)})
+                    else:
+                        stats['img_ins'] += len(re.findall(r'\[BILD:', r))
+                        buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
                     
         elif op == 'delete':
             for l in lines_left[i1:i2]:
-                stats['img_del'] += len(re.findall(r'\[BILD:', l))
+                c_l = clean_text_for_diff(l) if ignore_breaks else l
                 cid = extract_id(l)
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
-                buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
+                    
+                if ignore_breaks and not c_l:
+                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': ""})
+                else:
+                    stats['img_del'] += len(re.findall(r'\[BILD:', l))
+                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
                 
         elif op == 'insert':
             for r in lines_right[j1:j2]:
-                stats['img_ins'] += len(re.findall(r'\[BILD:', r))
+                c_r = clean_text_for_diff(r) if ignore_breaks else r
                 cid = extract_id(r)
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
-                buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+                    
+                if ignore_breaks and not c_r:
+                    buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(r)})
+                else:
+                    stats['img_ins'] += len(re.findall(r'\[BILD:', r))
+                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
 
     left_ids = set()
     right_ids = set()
@@ -348,9 +379,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
         
         if parsed_url.path == '/api/diff_data':
             try:
+                # Lese den neuen UI-Parameter aus (Default: True)
+                ignore_breaks = parse_qs(parsed_url.query).get('ignore_breaks', ['1'])[0] == '1'
+                
                 info_l = get_file_info(START_FILE_LEFT)
                 info_r = get_file_info(START_FILE_RIGHT)
-                diff, stats = berechne_diff_daten(info_l['content'], info_r['content'])
+                diff, stats = berechne_diff_daten(info_l['content'], info_r['content'], ignore_breaks)
                 
                 response_json = json.dumps({"diff": diff, "stats": stats}).encode('utf-8')
                 self.send_response(200)
@@ -461,7 +495,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <div id="loading-screen">⏳ Lade Semantic Engine...</div>
+            <div id="loading-screen">⏳ Lade Smart Filter Engine...</div>
 
             <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
@@ -497,18 +531,16 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         </div>
 
                         <div style="margin-top: 6px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
+                            <label style="cursor: pointer; color: #d4d4d4; font-size: 10px; font-weight: bold;"><input type="checkbox" id="chk-ignore-breaks" checked onchange="reloadDiff()"> ⚙️ Umbrüche ignorieren</label>
+                        </div>
+                        <div style="margin-top: 4px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
                             <b style="color: #9cdcfe;">MS Word Live-Sync</b><br>
                             <label style="cursor:pointer;"><input type="checkbox" id="sync-left" onchange="doLiveSync()"> Links</label> &nbsp;
                             <label style="cursor:pointer;"><input type="checkbox" id="sync-right" onchange="doLiveSync()"> Rechts</label>
                         </div>
-
-                        <div style="margin-top: 6px; text-align: center; border-top: 1px solid #444; padding-top: 4px;">
-                            <label style="cursor: pointer; color: #d4d4d4; font-size: 10px; margin-right: 5px;"><input type="checkbox" id="chk-show-lines" checked onchange="drawLines()"> Linien EIN</label>
-                            <label style="cursor: pointer; color: #d4d4d4; font-size: 10px;"><input type="checkbox" id="chk-equal-lines" checked onchange="drawLines()"> Graue (Gleich)</label>
-                        </div>
                     </div>
 
-                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report (Drucken)</button>
+                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report</button>
                 </div>
                 
                 <div class="pane-header right">
@@ -529,26 +561,33 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 let lastPageL = -1; let lastPageR = -1;
                 
                 window.onload = function() {
-                    try {
-                        fetch('/api/diff_data').then(res => res.json()).then(data => {
-                            if (data.error) {
-                                document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Backend-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`;
-                                return;
-                            }
-                            diffData = data.diff; statsData = data.stats;
-                            
-                            document.getElementById('loading-screen').style.display = 'none';
-                            document.getElementById('header-container').style.visibility = 'visible';
-                            document.getElementById('workspace').style.visibility = 'visible';
-                            
-                            renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
-                        }).catch(err => {
-                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Netzwerk-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`;
-                        });
-                    } catch(e) {
-                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ JS-Ladefehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${e}</span>`;
-                    }
+                    reloadDiff();
                 };
+                
+                function reloadDiff() {
+                    const ignore = document.getElementById('chk-ignore-breaks') ? document.getElementById('chk-ignore-breaks').checked : true;
+                    document.getElementById('loading-screen').style.display = 'block';
+                    document.getElementById('workspace').style.visibility = 'hidden';
+                    
+                    fetch('/api/diff_data?ignore_breaks=' + (ignore ? '1' : '0')).then(res => res.json()).then(data => {
+                        if (data.error) {
+                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Backend-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`;
+                            return;
+                        }
+                        diffData = data.diff; statsData = data.stats;
+                        
+                        document.getElementById('loading-screen').style.display = 'none';
+                        document.getElementById('header-container').style.visibility = 'visible';
+                        document.getElementById('workspace').style.visibility = 'visible';
+                        
+                        document.getElementById('left-editor').innerHTML = '';
+                        document.getElementById('right-editor').innerHTML = '';
+                        
+                        renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
+                    }).catch(err => {
+                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Netzwerk-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`;
+                    });
+                }
 
                 const svgContainer = document.getElementById('svg-container');
 
@@ -562,7 +601,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     try {
                         const arrayBuffer = await file.arrayBuffer();
                         const response = await fetch(`/api/upload?side=${side}&filename=${encodeURIComponent(file.name)}`, { method: 'POST', body: arrayBuffer });
-                        if (response.ok) window.location.reload(); 
+                        if (response.ok) reloadDiff(); 
                     } catch (error) { alert("Upload-Fehler"); }
                 }
 
@@ -684,20 +723,13 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         if (!svg || !leftEditor || !rightEditor || !container) return;
                         
                         while (svg.firstChild) { svg.removeChild(svg.firstChild); }
-                        
-                        const chkMaster = document.getElementById('chk-show-lines');
-                        const chkEqual = document.getElementById('chk-equal-lines');
-                        const showLines = chkMaster ? chkMaster.checked : true;
-                        const showEqual = chkEqual ? chkEqual.checked : true;
 
-                        if (!showLines) return;
-                        
                         const svgWidth = container.clientWidth || 100;
                         const lScroll = leftEditor.scrollTop;
                         const rScroll = rightEditor.scrollTop;
 
                         diffData.forEach(block => {
-                            if (block.tag === 'equal' && !showEqual) return;
+                            if (block.tag === 'equal') return; 
                             
                             const lEl = document.getElementById('l-' + block.id);
                             const rEl = document.getElementById('r-' + block.id);
@@ -710,7 +742,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             let color = '#007bff'; let opacity = '0.8'; let strokeWidth = '2.5';
                             if (block.tag === 'insert') { color = '#28a745'; }
                             else if (block.tag === 'delete') { color = '#dc3545'; }
-                            else if (block.tag === 'equal') { color = '#666666'; opacity = '0.3'; strokeWidth = '1.5'; }
 
                             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                             path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
