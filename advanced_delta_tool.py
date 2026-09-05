@@ -13,7 +13,7 @@ import html
 import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v32.0 (Nav-Sync & Absolute Anchor Engine)"
+APP_VERSION = "v33.0 (Smart Format & Invisible Breaks Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -66,7 +66,7 @@ def jump_to_word_page(side, page_num):
         return False
 
 # ==========================================
-# PURE PYTHON XML PARSER (Mit unsichtbarem Page-Tracking)
+# PURE PYTHON XML PARSER
 # ==========================================
 def get_docx_data(file_path):
     content = []
@@ -102,6 +102,7 @@ def get_docx_data(file_path):
                         for node in p.iter():
                             if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and any(v == 'page' for k,v in node.attrib.items())):
                                 page_count[0] += 1
+                                para_text += f"\n[SEITENUMBRUCH:{page_count[0]}]\n"
                             elif node.tag.endswith('}t') and node.text:
                                 para_text += node.text
                             elif node.tag.endswith('}tab'):
@@ -122,7 +123,6 @@ def get_docx_data(file_path):
                             for line in txt.split('\n'):
                                 clean_line = line.strip()
                                 if clean_line:
-                                    # Heftet die aktuelle Seitenzahl unsichtbar an jede Zeile
                                     content.append(f"[P:{page_count[0]}]{clean_line}")
                         
     except Exception as e:
@@ -149,7 +149,6 @@ def heal_text(lines):
             i += 1
             continue
             
-        # Extrahiere temporär den P-Tag für sauberes Heilen
         m_p = re.match(r'^(\[P:\d+\])(.*)', line)
         p_tag = m_p.group(1) if m_p else ""
         clean_line = m_p.group(2).strip() if m_p else line
@@ -188,7 +187,12 @@ def extract_id(text):
     return None
 
 def clean_text_for_diff(text):
-    return re.sub(r'\s+', ' ', text).strip()
+    t = re.sub(r'\[SEITENUMBRUCH:\d+\]', '', text)
+    return re.sub(r'\s+', ' ', t).strip()
+
+def remove_visual_breaks(text):
+    t = re.sub(r'\[SEITENUMBRUCH:\d+\]', '', text)
+    return t.strip()
 
 def highlight_inline(str_l, str_r):
     if len(str_l) > 3000 or len(str_r) > 3000:
@@ -230,7 +234,14 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
-                buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': html.escape(o_r['text']), 'page_l': o_l['page'], 'page_r': o_r['page']})
+                    
+                disp_l = remove_visual_breaks(o_l['text']) if ignore_breaks else o_l['text']
+                disp_r = remove_visual_breaks(o_r['text']) if ignore_breaks else o_r['text']
+                
+                if ignore_breaks and not disp_l and not disp_r:
+                    continue # Block unsichtbar machen
+                    
+                buckets[current_id].append({'tag': 'equal', 'left': html.escape(disp_l), 'right': html.escape(disp_r), 'page_l': o_l['page'], 'page_r': o_r['page']})
                 
         elif op == 'replace':
             sub_l = objs_l[i1:i2]
@@ -239,16 +250,20 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
                 o_l = sub_l[k] if k < len(sub_l) else {'page': '', 'text': ''}
                 o_r = sub_r[k] if k < len(sub_r) else {'page': '', 'text': ''}
                 
-                c_l = clean_text_for_diff(o_l['text']) if ignore_breaks else o_l['text']
-                c_r = clean_text_for_diff(o_r['text']) if ignore_breaks else o_r['text']
+                c_l = clean_text_for_diff(o_l['text'])
+                c_r = clean_text_for_diff(o_r['text'])
+                
+                disp_l = remove_visual_breaks(o_l['text']) if ignore_breaks else o_l['text']
+                disp_r = remove_visual_breaks(o_r['text']) if ignore_breaks else o_r['text']
                 
                 cid = extract_id(o_r['text']) or extract_id(o_l['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                 
-                if ignore_breaks and c_l == c_r and c_l:
-                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': html.escape(o_r['text']), 'page_l': o_l['page'], 'page_r': o_r['page']})
+                if ignore_breaks and c_l == c_r:
+                    if disp_l or disp_r:
+                        buckets[current_id].append({'tag': 'equal', 'left': html.escape(disp_l), 'right': html.escape(disp_r), 'page_l': o_l['page'], 'page_r': o_r['page']})
                     continue
 
                 if o_l['text'] and o_r['text']:
@@ -258,48 +273,59 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
                     if r_imgs > l_imgs: stats['img_ins'] += (r_imgs - l_imgs)
                     if l_imgs > r_imgs: stats['img_del'] += (l_imgs - r_imgs)
                     
-                    l_out, r_out = highlight_inline(o_l['text'], o_r['text'])
-                    buckets[current_id].append({'tag': 'replace', 'left': l_out, 'right': r_out, 'page_l': o_l['page'], 'page_r': o_r['page']})
+                    l_out, r_out = highlight_inline(disp_l, disp_r)
+                    
+                    # Gestrichelte Linie für reine Format/Umruch-Änderungen!
+                    current_tag = 'format' if (not ignore_breaks and c_l == c_r and disp_l != disp_r) else 'replace'
+                    buckets[current_id].append({'tag': current_tag, 'left': l_out, 'right': r_out, 'page_l': o_l['page'], 'page_r': o_r['page']})
                 elif o_l['text']:
                     if ignore_breaks and not c_l:
-                        buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
+                        if disp_l: buckets[current_id].append({'tag': 'equal', 'left': html.escape(disp_l), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                     else:
                         stats['img_del'] += len(re.findall(r'\[BILD:', o_l['text']))
-                        buckets[current_id].append({'tag': 'delete', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
+                        current_tag = 'format' if (not ignore_breaks and not c_l) else 'delete'
+                        buckets[current_id].append({'tag': current_tag, 'left': html.escape(disp_l), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                 elif o_r['text']:
                     if ignore_breaks and not c_r:
-                        buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
+                        if disp_r: buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(disp_r), 'page_l': '', 'page_r': o_r['page']})
                     else:
                         stats['img_ins'] += len(re.findall(r'\[BILD:', o_r['text']))
-                        buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
+                        current_tag = 'format' if (not ignore_breaks and not c_r) else 'insert'
+                        buckets[current_id].append({'tag': current_tag, 'left': "", 'right': html.escape(disp_r), 'page_l': '', 'page_r': o_r['page']})
                     
         elif op == 'delete':
             for o_l in objs_l[i1:i2]:
-                c_l = clean_text_for_diff(o_l['text']) if ignore_breaks else o_l['text']
+                c_l = clean_text_for_diff(o_l['text'])
+                disp_l = remove_visual_breaks(o_l['text']) if ignore_breaks else o_l['text']
+                
                 cid = extract_id(o_l['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                     
                 if ignore_breaks and not c_l:
-                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
+                    if disp_l: buckets[current_id].append({'tag': 'equal', 'left': html.escape(disp_l), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                 else:
                     stats['img_del'] += len(re.findall(r'\[BILD:', o_l['text']))
-                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
+                    current_tag = 'format' if (not ignore_breaks and not c_l) else 'delete'
+                    buckets[current_id].append({'tag': current_tag, 'left': html.escape(disp_l), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                 
         elif op == 'insert':
             for o_r in objs_r[j1:j2]:
-                c_r = clean_text_for_diff(o_r['text']) if ignore_breaks else o_r['text']
+                c_r = clean_text_for_diff(o_r['text'])
+                disp_r = remove_visual_breaks(o_r['text']) if ignore_breaks else o_r['text']
+                
                 cid = extract_id(o_r['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                     
                 if ignore_breaks and not c_r:
-                    buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
+                    if disp_r: buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(disp_r), 'page_l': '', 'page_r': o_r['page']})
                 else:
                     stats['img_ins'] += len(re.findall(r'\[BILD:', o_r['text']))
-                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
+                    current_tag = 'format' if (not ignore_breaks and not c_r) else 'insert'
+                    buckets[current_id].append({'tag': current_tag, 'left': "", 'right': html.escape(disp_r), 'page_l': '', 'page_r': o_r['page']})
 
     left_ids = set()
     right_ids = set()
@@ -323,8 +349,7 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
     for cid, items in buckets.items():
         if not items: continue
         
-        left_htmls = []
-        right_htmls = []
+        left_htmls, right_htmls = [], []
         tag_set = set()
         
         page_l = next((i['page_l'] for i in items if i['page_l']), "1")
@@ -335,7 +360,9 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
             right_htmls.append(f"<div class='inner-line bg-{item['tag']}'>{item['right']}</div>" if item['right'] else "<div class='inner-line bg-empty'></div>")
             tag_set.add(item['tag'])
             
-        overall_tag = 'equal' if tag_set == {'equal'} else 'replace'
+        overall_tag = 'equal'
+        if 'replace' in tag_set or 'delete' in tag_set or 'insert' in tag_set: overall_tag = 'replace'
+        elif 'format' in tag_set: overall_tag = 'format'
         
         diff_data.append({
             'id': block_id,
@@ -367,8 +394,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             
             temp_dir = tempfile.gettempdir()
             save_path = os.path.join(temp_dir, f"delta_tmp_{side}.docx")
-            with open(save_path, 'wb') as f:
-                f.write(file_data)
+            with open(save_path, 'wb') as f: f.write(file_data)
                 
             if side == 'left': START_FILE_LEFT = save_path; DISPLAY_NAME_LEFT = filename
             elif side == 'right': START_FILE_RIGHT = save_path; DISPLAY_NAME_RIGHT = filename
@@ -463,6 +489,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .bg-insert { background-color: rgba(40, 167, 69, 0.2); border-left: 3px solid #28a745; }
                 .bg-delete { background-color: rgba(220, 53, 69, 0.2); border-left: 3px solid #dc3545; text-decoration: line-through; opacity: 0.8; }
                 .bg-replace { background-color: rgba(0, 123, 255, 0.2); border-left: 3px solid #007bff; }
+                .bg-format { background-color: rgba(0, 123, 255, 0.08); border-left: 3px dashed #007bff; }
                 .bg-equal { background-color: transparent; border-left: 3px solid #555; }
                 .bg-empty { background-color: transparent; min-height: 1.2em; }
                 
@@ -650,6 +677,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     
                     target.style.boxShadow = "0 0 15px #ff9800";
                     setTimeout(() => { target.style.boxShadow = "0 2px 4px rgba(0,0,0,0.2)"; }, 1500);
+                    
+                    doLiveSync();
                 }
 
                 function changeView(side) {
@@ -658,7 +687,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     editor.classList.remove('view-delta', 'view-equal');
                     if (val !== 'all') editor.classList.add('view-' + val);
                     
-                    // Reset delta elements for navigation
                     deltaElements = [];
                     currentDeltaIdx = -1;
                     
@@ -679,14 +707,17 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         let imgClass = isChanged ? 'inline-img img-changed' : 'inline-img';
                         return `<div style="margin-top:10px; margin-bottom:10px;">${badge}<img src="/media?side=${side}&file=${path}" class="${imgClass}" alt="Bild" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Bild fehlt: ${path}</div>'"></div>`;
                     });
+                    res = res.replace(/\[SEITENUMBRUCH:\s*(\d+)\]/g, `<div class="page-break-line" data-page="$1"><span>Seite $1</span></div>`);
                     return res;
                 }
 
                 function renderEditors(leftEditor, rightEditor) {
                     try {
                         if (statsData.has_reqs) {
-                            document.getElementById('req-mode-badge').style.display = 'block';
-                            document.getElementById('stats-panel').style.display = 'block';
+                            const badge = document.getElementById('req-mode-badge');
+                            const panel = document.getElementById('stats-panel');
+                            if (badge) badge.style.display = 'block';
+                            if (panel) panel.style.display = 'block';
                             
                             safeSetText('l-eq', statsData.l_eq); safeSetText('l-rep', statsData.l_rep);
                             safeSetText('l-del', statsData.l_del); safeSetText('l-tot', statsData.l_tot);
@@ -703,7 +734,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 lDiv.id = `l-${block.id}`; lDiv.className = `bucket-block tag-${block.tag}`;
                                 lDiv.setAttribute('data-page', block.page_l);
                                 
-                                let btnL = `<button class='jump-btn' style='float:right;' onclick='jumpToPage("left", ${block.page_l})'>🎯 Word S.${block.page_l}</button>`;
+                                let btnL = `<button class='jump-btn' onclick='jumpToPage("left", ${block.page_l})'>🎯 Word S.${block.page_l}</button>`;
                                 let headerL = block.req_id !== "HEADER (Deckblatt/Inhaltsverzeichnis)" ? `<span>[${block.req_id}]</span>` : "";
                                 let prefixL = `<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px; display:flex; justify-content:space-between; align-items:center;'>${headerL}${btnL}</div>`;
                                 lDiv.innerHTML = prefixL + renderSpecialTags(block.left, 'left');
@@ -713,7 +744,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 rDiv.id = `r-${block.id}`; rDiv.className = `bucket-block tag-${block.tag}`;
                                 rDiv.setAttribute('data-page', block.page_r);
                                 
-                                let btnR = `<button class='jump-btn' style='float:right;' onclick='jumpToPage("right", ${block.page_r})'>🎯 Word S.${block.page_r}</button>`;
+                                let btnR = `<button class='jump-btn' onclick='jumpToPage("right", ${block.page_r})'>🎯 Word S.${block.page_r}</button>`;
                                 let headerR = block.req_id !== "HEADER (Deckblatt/Inhaltsverzeichnis)" ? `<span>[${block.req_id}]</span>` : "";
                                 let prefixR = `<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px; display:flex; justify-content:space-between; align-items:center;'>${headerR}${btnR}</div>`;
                                 rDiv.innerHTML = prefixR + renderSpecialTags(block.right, 'right');
@@ -735,7 +766,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         rightEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
                         setTimeout(drawLines, 300);
                         
-                        // Reset navigation
                         deltaElements = [];
                         currentDeltaIdx = -1;
                         
@@ -750,7 +780,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         const container = document.getElementById('svg-container');
                         
                         if (!svg || !leftEditor || !rightEditor || !container) return;
-                        
                         while (svg.firstChild) { svg.removeChild(svg.firstChild); }
                         
                         const chkMaster = document.getElementById('chk-show-lines');
@@ -766,7 +795,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             
                             const lEl = document.getElementById('l-' + block.id);
                             const rEl = document.getElementById('r-' + block.id);
-                            
                             if (!lEl || !rEl || lEl.offsetParent === null || rEl.offsetParent === null) return;
                             
                             const lY = lEl.offsetTop + 18 - lScroll;
@@ -775,11 +803,17 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             let color = '#007bff'; let opacity = '0.8'; let strokeWidth = '2.5';
                             if (block.tag === 'insert') { color = '#28a745'; }
                             else if (block.tag === 'delete') { color = '#dc3545'; }
+                            else if (block.tag === 'format') { color = '#007bff'; opacity = '0.6'; strokeWidth = '2'; }
 
                             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                             path.setAttribute('d', `M 0 ${lY} C ${svgWidth/2} ${lY}, ${svgWidth/2} ${rY}, ${svgWidth} ${rY}`);
                             path.setAttribute('fill', 'none'); path.setAttribute('stroke', color);
                             path.setAttribute('stroke-width', strokeWidth); path.setAttribute('opacity', opacity);
+                            
+                            if (block.tag === 'format') {
+                                path.setAttribute('stroke-dasharray', '6,6');
+                            }
+                            
                             svg.appendChild(path);
                         });
                     } catch(e) {}
