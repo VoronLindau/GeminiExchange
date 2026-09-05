@@ -13,7 +13,7 @@ import html
 import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v28.0 (Visual Connect & COM-Sync Engine)"
+APP_VERSION = "v29.0 (Visual Connect & COM-Sync Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -21,16 +21,15 @@ DISPLAY_NAME_LEFT = ""
 DISPLAY_NAME_RIGHT = ""
 
 # ==========================================
-# MS WORD COM-STEUERUNG (Für Live-Sync)
+# MS WORD COM-STEUERUNG (Robustes Live-Scrolling)
 # ==========================================
 def jump_to_word_page(file_path, page_num):
     if not file_path or not os.path.exists(file_path):
-        print("Fehler: Temp-Datei nicht gefunden.")
         return False
     try:
         import win32com.client
     except ImportError:
-        print("FEHLER: 'pywin32' fehlt! Bitte im Terminal 'pip install pywin32' ausführen.")
+        print("FEHLER: 'pywin32' fehlt!")
         return False
         
     try:
@@ -44,25 +43,30 @@ def jump_to_word_page(file_path, page_num):
                 doc = d
                 break
         if not doc:
-            print(f"Öffne Word-Dokument in MS Word: {abs_path}")
             doc = word.Documents.Open(abs_path)
             
         doc.Activate()
         word.Activate()
+        
         # 1 = wdGoToPage, 1 = wdGoToAbsolute
-        word.Selection.GoTo(1, 1, int(page_num))
+        rng = doc.GoTo(1, 1, int(page_num))
+        rng.Select()
+        # Zwingt den aktiven Word-Bildschirm, der Selektion zu folgen
+        word.ActiveWindow.ScrollIntoView(rng)
+        
         print(f"-> Erfolgreich in Word auf Seite {page_num} gesprungen!")
         return True
     except Exception as e:
-        print(f"WORD-BLOCKADE (Evtl. Geschützte Ansicht?): {e}")
+        print(f"WORD-SCROLL FEHLER: {e}")
         return False
 
 # ==========================================
-# PURE PYTHON XML PARSER (Namespace-Agnostic + Images)
+# PURE PYTHON XML PARSER (Namespace-Agnostic + Images + Paging)
 # ==========================================
 def get_docx_data(file_path):
     content = []
     objects = {}
+    page_count = [1]
     
     try:
         with zipfile.ZipFile(file_path, 'r') as z:
@@ -91,7 +95,11 @@ def get_docx_data(file_path):
                     if p.tag.endswith('}p'):
                         para_text = ""
                         for node in p.iter():
-                            if node.tag.endswith('}t') and node.text:
+                            # Stellt sicher, dass Seitenumbrüche wieder gezählt werden
+                            if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and node.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type') == 'page'):
+                                page_count[0] += 1
+                                para_text += f"\n[SEITENUMBRUCH:{page_count[0]}]\n"
+                            elif node.tag.endswith('}t') and node.text:
                                 para_text += node.text
                             elif node.tag.endswith('}tab'):
                                 para_text += " " 
@@ -106,8 +114,10 @@ def get_docx_data(file_path):
                                     img_hash = objects.get(img_path, "NO_HASH")
                                     para_text += f"\n[BILD:{img_path}|HASH:{img_hash}]\n"
                         
-                        txt = para_text.strip()
-                        if txt: content.append(txt)
+                        # Trennt Seitenumbrüche in eigene Zeilen auf
+                        for txt in para_text.split('\n'):
+                            clean_txt = txt.strip()
+                            if clean_txt: content.append(clean_txt)
                         
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
@@ -354,9 +364,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             target_file = START_FILE_LEFT if side == 'left' else START_FILE_RIGHT
             success = jump_to_word_page(target_file, page)
             
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
+            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
             return
             
@@ -424,6 +432,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .char-diff { background-color: rgba(0, 123, 255, 0.6); color: white; font-weight: bold; border-radius: 2px; padding: 0 2px; }
                 .inline-img { max-width: 90%; max-height: 300px; border: 2px dashed #007acc; padding: 5px; margin: 5px 0; background: #2d2d2d; border-radius: 4px; display: block; box-sizing: border-box;}
                 .img-changed { border: 3px solid #007bff; box-shadow: 0 0 8px rgba(0,123,255,0.6); }
+                
+                .page-break-line { border-top: 1px dashed #dc3545; margin: 15px 0; position: relative; width: 100%; }
+                .page-break-line span { background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px; }
+                .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 9px; cursor: pointer; padding: 2px 4px;}
+                .jump-btn:hover { background: #fff; color: #dc3545; }
                 
                 .editor-container.view-delta .tag-equal { display: none !important; }
                 #loading-screen { position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#007acc; font-size:24px; font-weight:bold; z-index: 1000; text-align: center; }
@@ -552,7 +565,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function jumpToPage(side, page) {
                     fetch(`/api/jump?side=${side}&page=${page}`).then(res => res.json()).then(data => {
-                        if(!data.success) console.warn("MS Word Fernsteuerung blockiert. Siehe Terminal-Output.");
+                        if(!data.success) console.warn("MS Word Fernsteuerung fehlgeschlagen. Siehe Python Terminal.");
                     });
                 }
 
@@ -590,21 +603,22 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     if (val !== 'all') editor.classList.add('view-' + val);
                     setTimeout(drawLines, 50); 
                 }
-
-                function safeSetText(id, text) {
-                    const el = document.getElementById(id);
-                    if (el) el.textContent = text;
-                }
                 
                 function renderSpecialTags(htmlStr, side) {
                     if (!htmlStr) return '';
-                    return htmlStr.replace(/\[BILD:(.*?)\|HASH:(.*?)\]/g, function(match, pathPart, hashPart) {
+                    
+                    // Rendert Bilder
+                    let res = htmlStr.replace(/\[BILD:(.*?)\|HASH:(.*?)\]/g, function(match, pathPart, hashPart) {
                         let isChanged = hashPart.includes("char-diff");
                         let path = pathPart.replace(/<[^>]*>?/gm, '').trim(); 
-                        let badge = isChanged ? `<div style="background:#007bff; color:white; font-size:10px; padding:2px 5px; display:inline-block; border-radius:3px; margin-bottom:4px; font-weight:bold; box-shadow: 0 1px 3px rgba(0,0,0,0.5);">🔄 BILD GEÄNDERT</div><br>` : '';
+                        let badge = isChanged ? `<div style="background:#007bff; color:white; font-size:10px; padding:2px 5px; display:inline-block; border-radius:3px; margin-bottom:4px; font-weight:bold;">🔄 BILD GEÄNDERT</div><br>` : '';
                         let imgClass = isChanged ? 'inline-img img-changed' : 'inline-img';
                         return `<div style="margin-top:10px; margin-bottom:10px;">${badge}<img src="/media?side=${side}&file=${path}" class="${imgClass}" alt="Bild" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Bild fehlt: ${path}</div>'"></div>`;
                     });
+                    
+                    // Rendert rote Seitenumbrüche OHNE <span class="char-diff"> Störungen
+                    res = res.replace(/(?:<[^>]+>)*\[SEITENUMBRUCH:(\d+)\](?:<[^>]+>)*/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
+                    return res;
                 }
 
                 function renderEditors(leftEditor, rightEditor) {
@@ -615,12 +629,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             if (badge) badge.style.display = 'block';
                             if (panel) panel.style.display = 'block';
                             
+                            const safeSetText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
                             safeSetText('l-eq', statsData.l_eq); safeSetText('l-rep', statsData.l_rep);
                             safeSetText('l-del', statsData.l_del); safeSetText('l-tot', statsData.l_tot);
-                            
                             safeSetText('r-eq', statsData.r_eq); safeSetText('r-rep', statsData.r_rep);
                             safeSetText('r-ins', statsData.r_ins); safeSetText('r-tot', statsData.r_tot);
-                            
                             safeSetText('img-rep', statsData.img_rep); safeSetText('img-ins', statsData.img_ins);
                         }
 
@@ -647,7 +660,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 }
                             });
                         } else {
-                            leftEditor.innerHTML = "<div style='padding:20px; color:#888;'>Keine extrahierbaren Texte gefunden. Bitte lade eine DOCX hoch.</div>";
+                            leftEditor.innerHTML = "<div style='padding:20px; color:#888;'>Keine Texte extrahierbar.</div>";
                         }
                         
                         leftEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
