@@ -13,7 +13,7 @@ import html
 import collections
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "v31.0 (Smart Filter & Page-Sync Engine)"
+APP_VERSION = "v32.0 (Nav-Sync & Absolute Anchor Engine)"
 
 START_FILE_LEFT = ""
 START_FILE_RIGHT = ""
@@ -66,11 +66,10 @@ def jump_to_word_page(side, page_num):
         return False
 
 # ==========================================
-# PURE PYTHON XML PARSER 
+# PURE PYTHON XML PARSER (Mit unsichtbarem Page-Tracking)
 # ==========================================
 def get_docx_data(file_path):
     content = []
-    objects = {}
     page_count = [1]
     
     try:
@@ -88,6 +87,7 @@ def get_docx_data(file_path):
                             elif not target.startswith('word/'): target = 'word/' + target
                             rels[r_id] = target
 
+            objects = {}
             for name in z.namelist():
                 if name.startswith(('word/media/', 'word/embeddings/')):
                     objects[name] = hashlib.sha256(z.read(name)).hexdigest()
@@ -102,7 +102,6 @@ def get_docx_data(file_path):
                         for node in p.iter():
                             if node.tag.endswith('}lastRenderedPageBreak') or (node.tag.endswith('}br') and any(v == 'page' for k,v in node.attrib.items())):
                                 page_count[0] += 1
-                                para_text += f"\n[SEITENUMBRUCH:{page_count[0]}]\n"
                             elif node.tag.endswith('}t') and node.text:
                                 para_text += node.text
                             elif node.tag.endswith('}tab'):
@@ -119,7 +118,12 @@ def get_docx_data(file_path):
                                     para_text += f"\n[BILD:{img_path}|HASH:{img_hash}]\n"
                         
                         txt = para_text.strip()
-                        if txt: content.append(txt)
+                        if txt:
+                            for line in txt.split('\n'):
+                                clean_line = line.strip()
+                                if clean_line:
+                                    # Heftet die aktuelle Seitenzahl unsichtbar an jede Zeile
+                                    content.append(f"[P:{page_count[0]}]{clean_line}")
                         
     except Exception as e:
         print(f"Fehler beim XML-Parsing: {e}")
@@ -128,12 +132,11 @@ def get_docx_data(file_path):
 def get_file_info(file_path):
     if not file_path or not os.path.exists(file_path):
         return {"path": "", "content": ["\n\n\n\n     ⬇ Bitte eine Office-Datei per Drag & Drop hier ablegen ⬇\n\n\n"]}
-    
     if file_path.lower().endswith('.docx'):
         content = get_docx_data(file_path)
     else:
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = [l.strip() for l in f.readlines() if l.strip()]
+            content = [f"[P:1]{l.strip()}" for l in f.readlines() if l.strip()]
     return {"path": file_path.replace('\\', '/'), "content": content}
 
 def heal_text(lines):
@@ -146,19 +149,27 @@ def heal_text(lines):
             i += 1
             continue
             
-        m = re.match(r'^(\d+)(?:\.|$)', line)
+        # Extrahiere temporär den P-Tag für sauberes Heilen
+        m_p = re.match(r'^(\[P:\d+\])(.*)', line)
+        p_tag = m_p.group(1) if m_p else ""
+        clean_line = m_p.group(2).strip() if m_p else line
+            
+        m = re.match(r'^(\d+)(?:\.|$)', clean_line)
         if m: last_major = m.group(1)
         
-        if re.match(r'^\d+\.?$', line) and i+1 < len(lines) and re.match(r'^\.\d+', lines[i+1].strip()):
-            merged = line + lines[i+1].strip()
-            res.append(merged)
-            m2 = re.match(r'^(\d+)', merged)
-            if m2: last_major = m2.group(1)
-            i += 2
-            continue
+        if re.match(r'^\d+\.?$', clean_line) and i+1 < len(lines):
+            next_m = re.match(r'^(\[P:\d+\])(.*)', lines[i+1].strip())
+            next_clean = next_m.group(2).strip() if next_m else lines[i+1].strip()
+            if re.match(r'^\.\d+', next_clean):
+                merged = clean_line + next_clean
+                res.append(p_tag + merged)
+                m2 = re.match(r'^(\d+)', merged)
+                if m2: last_major = m2.group(1)
+                i += 2
+                continue
             
-        if re.match(r'^\.\d+', line) and last_major:
-            res.append(last_major + line)
+        if re.match(r'^\.\d+', clean_line) and last_major:
+            res.append(p_tag + last_major + clean_line)
             i += 1
             continue
             
@@ -166,20 +177,22 @@ def heal_text(lines):
         i += 1
     return res
 
+def parse_line_obj(line):
+    m = re.match(r'^(\[P:(\d+)\])(.*)', line)
+    if m: return m.group(2), m.group(3).strip()
+    return "1", line.strip()
+
 def extract_id(text):
     m = re.match(r'^\s*(?:ID\s+\d+:|\[REQ-\d+\]|REQ\s+\d+:|\d+(?:\.\d+)*[a-zA-Z]?|\d+\.)(?:\s|$)', text, re.IGNORECASE)
     if m: return m.group(0).strip()
     return None
 
 def clean_text_for_diff(text):
-    """Wascht Seitenumbrüche und leere Zeilen für die reine Text-Mathematik heraus"""
-    t = re.sub(r'\[SEITENUMBRUCH:\d+\]', '', text)
-    return re.sub(r'\s+', ' ', t).strip()
+    return re.sub(r'\s+', ' ', text).strip()
 
 def highlight_inline(str_l, str_r):
     if len(str_l) > 3000 or len(str_r) > 3000:
         return f"<span class='char-diff'>{html.escape(str_l)}</span>", f"<span class='char-diff'>{html.escape(str_r)}</span>"
-        
     sm_inline = difflib.SequenceMatcher(None, str_l, str_r)
     left_out, right_out = "", ""
     for op_in, m1, m2, n1, n2 in sm_inline.get_opcodes():
@@ -195,105 +208,98 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
     lines_left = heal_text(lines_left)
     lines_right = heal_text(lines_right)
     
-    if ignore_breaks:
-        clean_l_arr = [clean_text_for_diff(l) for l in lines_left]
-        clean_r_arr = [clean_text_for_diff(r) for r in lines_right]
-    else:
-        clean_l_arr = lines_left
-        clean_r_arr = lines_right
+    objs_l = [{'page': p, 'text': t} for p, t in (parse_line_obj(l) for l in lines_left)]
+    objs_r = [{'page': p, 'text': t} for p, t in (parse_line_obj(r) for r in lines_right)]
+    
+    clean_l = [clean_text_for_diff(o['text']) if ignore_breaks else o['text'] for o in objs_l]
+    clean_r = [clean_text_for_diff(o['text']) if ignore_breaks else o['text'] for o in objs_r]
 
-    sm = difflib.SequenceMatcher(None, clean_l_arr, clean_r_arr, autojunk=False)
+    sm = difflib.SequenceMatcher(None, clean_l, clean_r, autojunk=False)
     
     buckets = collections.OrderedDict()
     current_id = "HEADER (Deckblatt/Inhaltsverzeichnis)"
     buckets[current_id] = []
     
-    stats = {
-        "l_eq": 0, "l_rep": 0, "l_del": 0, "l_tot": 0,
-        "r_eq": 0, "r_rep": 0, "r_ins": 0, "r_tot": 0,
-        "img_eq": 0, "img_rep": 0, "img_del": 0, "img_ins": 0,
-        "has_reqs": False
-    }
+    stats = {"l_eq": 0, "l_rep": 0, "l_del": 0, "l_tot": 0, "r_eq": 0, "r_rep": 0, "r_ins": 0, "r_tot": 0, "img_eq": 0, "img_rep": 0, "img_del": 0, "img_ins": 0, "has_reqs": False}
     
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == 'equal':
-            for l, r in zip(lines_left[i1:i2], lines_right[j1:j2]):
-                stats['img_eq'] += len(re.findall(r'\[BILD:', l))
-                cid = extract_id(r) or extract_id(l)
+            for o_l, o_r in zip(objs_l[i1:i2], objs_r[j1:j2]):
+                stats['img_eq'] += len(re.findall(r'\[BILD:', o_l['text']))
+                cid = extract_id(o_r['text']) or extract_id(o_l['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
-                buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': html.escape(r)})
+                buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': html.escape(o_r['text']), 'page_l': o_l['page'], 'page_r': o_r['page']})
                 
         elif op == 'replace':
-            sub_l = lines_left[i1:i2]
-            sub_r = lines_right[j1:j2]
+            sub_l = objs_l[i1:i2]
+            sub_r = objs_r[j1:j2]
             for k in range(max(len(sub_l), len(sub_r))):
-                l = sub_l[k] if k < len(sub_l) else ""
-                r = sub_r[k] if k < len(sub_r) else ""
+                o_l = sub_l[k] if k < len(sub_l) else {'page': '', 'text': ''}
+                o_r = sub_r[k] if k < len(sub_r) else {'page': '', 'text': ''}
                 
-                c_l = clean_text_for_diff(l) if ignore_breaks else l
-                c_r = clean_text_for_diff(r) if ignore_breaks else r
+                c_l = clean_text_for_diff(o_l['text']) if ignore_breaks else o_l['text']
+                c_r = clean_text_for_diff(o_r['text']) if ignore_breaks else o_r['text']
                 
-                cid = extract_id(r) or extract_id(l)
+                cid = extract_id(o_r['text']) or extract_id(o_l['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                 
-                # Wenn ignorieren aktiv ist und die Zeilen bereinigt identisch sind:
-                if ignore_breaks and c_l == c_r:
-                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': html.escape(r)})
+                if ignore_breaks and c_l == c_r and c_l:
+                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': html.escape(o_r['text']), 'page_l': o_l['page'], 'page_r': o_r['page']})
                     continue
 
-                if l and r:
-                    l_imgs = len(re.findall(r'\[BILD:', l))
-                    r_imgs = len(re.findall(r'\[BILD:', r))
+                if o_l['text'] and o_r['text']:
+                    l_imgs = len(re.findall(r'\[BILD:', o_l['text']))
+                    r_imgs = len(re.findall(r'\[BILD:', o_r['text']))
                     stats['img_rep'] += min(l_imgs, r_imgs)
                     if r_imgs > l_imgs: stats['img_ins'] += (r_imgs - l_imgs)
                     if l_imgs > r_imgs: stats['img_del'] += (l_imgs - r_imgs)
                     
-                    l_out, r_out = highlight_inline(l, r)
-                    buckets[current_id].append({'tag': 'replace', 'left': l_out, 'right': r_out})
-                elif l:
+                    l_out, r_out = highlight_inline(o_l['text'], o_r['text'])
+                    buckets[current_id].append({'tag': 'replace', 'left': l_out, 'right': r_out, 'page_l': o_l['page'], 'page_r': o_r['page']})
+                elif o_l['text']:
                     if ignore_breaks and not c_l:
-                        buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': ""})
+                        buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                     else:
-                        stats['img_del'] += len(re.findall(r'\[BILD:', l))
-                        buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
-                elif r:
+                        stats['img_del'] += len(re.findall(r'\[BILD:', o_l['text']))
+                        buckets[current_id].append({'tag': 'delete', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
+                elif o_r['text']:
                     if ignore_breaks and not c_r:
-                        buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(r)})
+                        buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
                     else:
-                        stats['img_ins'] += len(re.findall(r'\[BILD:', r))
-                        buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+                        stats['img_ins'] += len(re.findall(r'\[BILD:', o_r['text']))
+                        buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
                     
         elif op == 'delete':
-            for l in lines_left[i1:i2]:
-                c_l = clean_text_for_diff(l) if ignore_breaks else l
-                cid = extract_id(l)
+            for o_l in objs_l[i1:i2]:
+                c_l = clean_text_for_diff(o_l['text']) if ignore_breaks else o_l['text']
+                cid = extract_id(o_l['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                     
                 if ignore_breaks and not c_l:
-                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(l), 'right': ""})
+                    buckets[current_id].append({'tag': 'equal', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                 else:
-                    stats['img_del'] += len(re.findall(r'\[BILD:', l))
-                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(l), 'right': ""})
+                    stats['img_del'] += len(re.findall(r'\[BILD:', o_l['text']))
+                    buckets[current_id].append({'tag': 'delete', 'left': html.escape(o_l['text']), 'right': "", 'page_l': o_l['page'], 'page_r': ''})
                 
         elif op == 'insert':
-            for r in lines_right[j1:j2]:
-                c_r = clean_text_for_diff(r) if ignore_breaks else r
-                cid = extract_id(r)
+            for o_r in objs_r[j1:j2]:
+                c_r = clean_text_for_diff(o_r['text']) if ignore_breaks else o_r['text']
+                cid = extract_id(o_r['text'])
                 if cid: 
                     current_id = cid
                     if current_id not in buckets: buckets[current_id] = []
                     
                 if ignore_breaks and not c_r:
-                    buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(r)})
+                    buckets[current_id].append({'tag': 'equal', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
                 else:
-                    stats['img_ins'] += len(re.findall(r'\[BILD:', r))
-                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(r)})
+                    stats['img_ins'] += len(re.findall(r'\[BILD:', o_r['text']))
+                    buckets[current_id].append({'tag': 'insert', 'left': "", 'right': html.escape(o_r['text']), 'page_l': '', 'page_r': o_r['page']})
 
     left_ids = set()
     right_ids = set()
@@ -302,19 +308,15 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
         if any(i['left'] for i in items): left_ids.add(cid)
         if any(i['right'] for i in items): right_ids.add(cid)
         
-    stats["l_del"] = len(left_ids - right_ids)
-    stats["l_tot"] = len(left_ids)
-    stats["r_ins"] = len(right_ids - left_ids)
-    stats["r_tot"] = len(right_ids)
+    stats["l_del"] = len(left_ids - right_ids); stats["l_tot"] = len(left_ids)
+    stats["r_ins"] = len(right_ids - left_ids); stats["r_tot"] = len(right_ids)
     stats["has_reqs"] = len(left_ids) > 0 or len(right_ids) > 0
     
     intersect = left_ids & right_ids
     for cid in intersect:
         has_diff = any(i['tag'] != 'equal' and (i['left'] or i['right']) for i in buckets[cid])
-        if not has_diff:
-            stats['l_eq'] += 1; stats['r_eq'] += 1
-        else:
-            stats['l_rep'] += 1; stats['r_rep'] += 1
+        if not has_diff: stats['l_eq'] += 1; stats['r_eq'] += 1
+        else: stats['l_rep'] += 1; stats['r_rep'] += 1
 
     diff_data = []
     block_id = 0
@@ -325,7 +327,8 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
         right_htmls = []
         tag_set = set()
         
-        prefix = f"<div class='chapter-header' style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px;'>[{cid}]</div>" if cid != "HEADER (Deckblatt/Inhaltsverzeichnis)" else ""
+        page_l = next((i['page_l'] for i in items if i['page_l']), "1")
+        page_r = next((i['page_r'] for i in items if i['page_r']), "1")
         
         for item in items:
             left_htmls.append(f"<div class='inner-line bg-{item['tag']}'>{item['left']}</div>" if item['left'] else "<div class='inner-line bg-empty'></div>")
@@ -338,8 +341,10 @@ def berechne_diff_daten(lines_left, lines_right, ignore_breaks=True):
             'id': block_id,
             'req_id': cid,
             'tag': overall_tag,
-            'left': prefix + "".join(left_htmls),
-            'right': prefix + "".join(right_htmls)
+            'page_l': page_l,
+            'page_r': page_r,
+            'left': "".join(left_htmls),
+            'right': "".join(right_htmls)
         })
         block_id += 1
 
@@ -365,10 +370,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             with open(save_path, 'wb') as f:
                 f.write(file_data)
                 
-            if side == 'left':
-                START_FILE_LEFT = save_path; DISPLAY_NAME_LEFT = filename
-            elif side == 'right':
-                START_FILE_RIGHT = save_path; DISPLAY_NAME_RIGHT = filename
+            if side == 'left': START_FILE_LEFT = save_path; DISPLAY_NAME_LEFT = filename
+            elif side == 'right': START_FILE_RIGHT = save_path; DISPLAY_NAME_RIGHT = filename
                 
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(b'{"status": "ok"}')
@@ -379,25 +382,19 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
         
         if parsed_url.path == '/api/diff_data':
             try:
-                # Lese den neuen UI-Parameter aus (Default: True)
                 ignore_breaks = parse_qs(parsed_url.query).get('ignore_breaks', ['1'])[0] == '1'
-                
                 info_l = get_file_info(START_FILE_LEFT)
                 info_r = get_file_info(START_FILE_RIGHT)
                 diff, stats = berechne_diff_daten(info_l['content'], info_r['content'], ignore_breaks)
                 
                 response_json = json.dumps({"diff": diff, "stats": stats}).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Content-Length', str(len(response_json)))
-                self.end_headers()
+                self.send_response(200); self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(response_json))); self.end_headers()
                 self.wfile.write(response_json)
             except Exception as e:
                 error_json = json.dumps({"error": str(e)}).encode('utf-8')
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Content-Length', str(len(error_json)))
-                self.end_headers()
+                self.send_response(500); self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(error_json))); self.end_headers()
                 self.wfile.write(error_json)
             return
             
@@ -405,9 +402,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed_url.query)
             side = query.get('side', [''])[0]
             page = query.get('page', ['1'])[0]
-            
             success = jump_to_word_page(side, page)
-            
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps({"success": success}).encode('utf-8'))
             return
@@ -462,7 +457,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 #svg-container { width: 100px; flex-shrink: 0; position: relative; background: var(--bg-panel); border-left: 1px solid #444; border-right: 1px solid #444; }
                 svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
                 
-                .bucket-block { background-color: #252526; border: 1px solid #444; border-radius: 4px; margin-bottom: 12px; padding: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: min-height 0.2s;}
+                .bucket-block { background-color: #252526; border: 1px solid #444; border-radius: 4px; margin-bottom: 12px; padding: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: min-height 0.2s, box-shadow 0.5s;}
                 .inner-line { padding: 2px 5px; margin-bottom: 3px; border-radius: 2px; min-height: 1.2em; word-wrap: break-word; font-family: 'Consolas', monospace;}
                 
                 .bg-insert { background-color: rgba(40, 167, 69, 0.2); border-left: 3px solid #28a745; }
@@ -475,27 +470,27 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 .inline-img { max-width: 90%; max-height: 300px; border: 2px dashed #007acc; padding: 5px; margin: 5px 0; background: #2d2d2d; border-radius: 4px; display: block; box-sizing: border-box;}
                 .img-changed { border: 3px solid #007bff; box-shadow: 0 0 8px rgba(0,123,255,0.6); }
                 
-                .page-break-line { border-top: 1px dashed #dc3545; margin: 15px 0; position: relative; width: 100%; }
-                .page-break-line span { 
-                    background: #dc3545; color: white; padding: 2px 6px; font-size: 11px; font-weight: bold; 
-                    border-radius: 0 0 0 4px; position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 6px;
-                }
-                .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 9px; cursor: pointer; padding: 2px 4px;}
+                .jump-btn { background: #1e1e1e; color: #fff; border: 1px solid #fff; border-radius: 3px; font-size: 10px; cursor: pointer; padding: 3px 6px;}
                 .jump-btn:hover { background: #fff; color: #dc3545; }
+                
+                #nav-buttons { position:fixed; bottom:20px; right:20px; z-index:1000; display:flex; gap:10px; }
+                .nav-btn { font-weight:bold; color:white; border:none; padding:10px 15px; border-radius:4px; cursor:pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s;}
+                .nav-btn:hover { filter: brightness(1.2); }
                 
                 .editor-container.view-delta .tag-equal { display: none !important; }
                 #loading-screen { position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:#007acc; font-size:24px; font-weight:bold; z-index: 1000; text-align: center; }
                 
                 @media print { 
-                    #header-container, #svg-container { display: none !important; } 
+                    #header-container, #svg-container, #nav-buttons { display: none !important; } 
                     body, #workspace { overflow: visible !important; height: auto !important; } 
                     .editor-container { overflow: visible !important; border: none; padding:0; width:48%; float:left; margin-right:2%;} 
                     .bucket-block { page-break-inside: avoid; border: 1px solid #ccc;}
+                    .jump-btn { display: none !important; }
                 }
             </style>
         </head>
         <body>
-            <div id="loading-screen">⏳ Lade Smart Filter Engine...</div>
+            <div id="loading-screen">⏳ Analysiere Diff-Schablonen... Bitte warten.</div>
 
             <div id="header-container" style="visibility: hidden;">
                 <div class="pane-header left">
@@ -540,7 +535,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         </div>
                     </div>
 
-                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report</button>
+                    <button class="word-btn" onclick="window.print()">🖨️ PDF Report (Drucken)</button>
                 </div>
                 
                 <div class="pane-header right">
@@ -554,39 +549,41 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 <div id="svg-container"><svg id="lines-svg"></svg></div>
                 <div id="right-editor" class="editor-container"></div>
             </div>
+            
+            <div id="nav-buttons" style="visibility: hidden;">
+                <button class="nav-btn" style="background:#ff9800;" onclick="jumpDelta(-1)">⬆ Vorheriges Delta</button>
+                <button class="nav-btn" style="background:#007acc;" onclick="jumpDelta(1)">⬇ Nächstes Delta</button>
+            </div>
 
             <script>
                 let diffData = []; let statsData = {};
                 let syncTimer = null;
                 let lastPageL = -1; let lastPageR = -1;
+                let currentDeltaIdx = -1;
+                let deltaElements = [];
                 
-                window.onload = function() {
-                    reloadDiff();
-                };
+                window.onload = function() { reloadDiff(); };
                 
                 function reloadDiff() {
                     const ignore = document.getElementById('chk-ignore-breaks') ? document.getElementById('chk-ignore-breaks').checked : true;
                     document.getElementById('loading-screen').style.display = 'block';
                     document.getElementById('workspace').style.visibility = 'hidden';
+                    document.getElementById('nav-buttons').style.visibility = 'hidden';
                     
                     fetch('/api/diff_data?ignore_breaks=' + (ignore ? '1' : '0')).then(res => res.json()).then(data => {
-                        if (data.error) {
-                            document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Backend-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`;
-                            return;
-                        }
+                        if (data.error) { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Backend-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${data.error}</span>`; return; }
                         diffData = data.diff; statsData = data.stats;
                         
                         document.getElementById('loading-screen').style.display = 'none';
                         document.getElementById('header-container').style.visibility = 'visible';
                         document.getElementById('workspace').style.visibility = 'visible';
+                        document.getElementById('nav-buttons').style.visibility = 'visible';
                         
                         document.getElementById('left-editor').innerHTML = '';
                         document.getElementById('right-editor').innerHTML = '';
                         
                         renderEditors(document.getElementById('left-editor'), document.getElementById('right-editor'));
-                    }).catch(err => {
-                        document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Netzwerk-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`;
-                    });
+                    }).catch(err => { document.getElementById('loading-screen').innerHTML = `<span style="color:#dc3545">❌ Netzwerk-Fehler:</span><br><br><span style="font-size:14px; color:#d4d4d4">${err}</span>`; });
                 }
 
                 const svgContainer = document.getElementById('svg-container');
@@ -613,11 +610,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
 
                 function getPage(eid) {
                     let ed = document.getElementById(eid);
-                    let breaks = ed.getElementsByClassName('page-break-line');
+                    let blocks = ed.getElementsByClassName('bucket-block');
                     let curr = 1;
-                    let viewTop = ed.scrollTop;
-                    for(let b of breaks) {
-                        if(b.offsetTop <= viewTop + (ed.clientHeight/2)) {
+                    let viewCenter = ed.scrollTop + (ed.clientHeight / 2);
+                    for(let b of blocks) {
+                        if(b.offsetTop <= viewCenter) {
                             curr = parseInt(b.getAttribute('data-page') || curr);
                         } else { break; }
                     }
@@ -637,12 +634,34 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         }
                     }, 800);
                 }
+                
+                function jumpDelta(dir) {
+                    if(deltaElements.length === 0) {
+                        deltaElements = Array.from(document.getElementById('left-editor').querySelectorAll('.bucket-block:not(.tag-equal)'));
+                    }
+                    if(deltaElements.length === 0) return; 
+                    
+                    currentDeltaIdx += dir;
+                    if(currentDeltaIdx < 0) currentDeltaIdx = 0;
+                    if(currentDeltaIdx >= deltaElements.length) currentDeltaIdx = deltaElements.length - 1;
+                    
+                    const target = deltaElements[currentDeltaIdx];
+                    target.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    
+                    target.style.boxShadow = "0 0 15px #ff9800";
+                    setTimeout(() => { target.style.boxShadow = "0 2px 4px rgba(0,0,0,0.2)"; }, 1500);
+                }
 
                 function changeView(side) {
                     const editor = document.getElementById(side + '-editor');
                     const val = document.getElementById('view-' + side).value;
                     editor.classList.remove('view-delta', 'view-equal');
                     if (val !== 'all') editor.classList.add('view-' + val);
+                    
+                    // Reset delta elements for navigation
+                    deltaElements = [];
+                    currentDeltaIdx = -1;
+                    
                     setTimeout(drawLines, 50); 
                 }
 
@@ -660,17 +679,14 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         let imgClass = isChanged ? 'inline-img img-changed' : 'inline-img';
                         return `<div style="margin-top:10px; margin-bottom:10px;">${badge}<img src="/media?side=${side}&file=${path}" class="${imgClass}" alt="Bild" onload="drawLines()" onerror="this.outerHTML='<div style=\\'color:red; border:1px solid red; padding:5px;\\'>Bild fehlt: ${path}</div>'"></div>`;
                     });
-                    res = res.replace(/\\[SEITENUMBRUCH:\s*(\d+)\\]/g, `<div class="page-break-line" data-page="$1"><span>Seite $1 <button class="jump-btn" onclick="jumpToPage('${side}', $1)">🎯 Word</button></span></div>`);
                     return res;
                 }
 
                 function renderEditors(leftEditor, rightEditor) {
                     try {
                         if (statsData.has_reqs) {
-                            const badge = document.getElementById('req-mode-badge');
-                            const panel = document.getElementById('stats-panel');
-                            if (badge) badge.style.display = 'block';
-                            if (panel) panel.style.display = 'block';
+                            document.getElementById('req-mode-badge').style.display = 'block';
+                            document.getElementById('stats-panel').style.display = 'block';
                             
                             safeSetText('l-eq', statsData.l_eq); safeSetText('l-rep', statsData.l_rep);
                             safeSetText('l-del', statsData.l_del); safeSetText('l-tot', statsData.l_tot);
@@ -685,12 +701,22 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             diffData.forEach(block => {
                                 const lDiv = document.createElement('div');
                                 lDiv.id = `l-${block.id}`; lDiv.className = `bucket-block tag-${block.tag}`;
-                                lDiv.innerHTML = renderSpecialTags(block.left, 'left');
+                                lDiv.setAttribute('data-page', block.page_l);
+                                
+                                let btnL = `<button class='jump-btn' style='float:right;' onclick='jumpToPage("left", ${block.page_l})'>🎯 Word S.${block.page_l}</button>`;
+                                let headerL = block.req_id !== "HEADER (Deckblatt/Inhaltsverzeichnis)" ? `<span>[${block.req_id}]</span>` : "";
+                                let prefixL = `<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px; display:flex; justify-content:space-between; align-items:center;'>${headerL}${btnL}</div>`;
+                                lDiv.innerHTML = prefixL + renderSpecialTags(block.left, 'left');
                                 leftEditor.appendChild(lDiv);
 
                                 const rDiv = document.createElement('div');
                                 rDiv.id = `r-${block.id}`; rDiv.className = `bucket-block tag-${block.tag}`;
-                                rDiv.innerHTML = renderSpecialTags(block.right, 'right');
+                                rDiv.setAttribute('data-page', block.page_r);
+                                
+                                let btnR = `<button class='jump-btn' style='float:right;' onclick='jumpToPage("right", ${block.page_r})'>🎯 Word S.${block.page_r}</button>`;
+                                let headerR = block.req_id !== "HEADER (Deckblatt/Inhaltsverzeichnis)" ? `<span>[${block.req_id}]</span>` : "";
+                                let prefixR = `<div style='color:#9cdcfe; font-weight:bold; margin-bottom:6px; font-size:14px; border-bottom:1px solid #444; padding-bottom:2px; display:flex; justify-content:space-between; align-items:center;'>${headerR}${btnR}</div>`;
+                                rDiv.innerHTML = prefixR + renderSpecialTags(block.right, 'right');
                                 rightEditor.appendChild(rDiv);
                             });
                             
@@ -708,9 +734,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         leftEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
                         rightEditor.insertAdjacentHTML('beforeend', '<div class="drag-overlay">📥 HIER ABLEGEN</div>');
                         setTimeout(drawLines, 300);
-                    } catch(e) {
-                        alert("Fehler beim Rendern der Editoren: " + e);
-                    }
+                        
+                        // Reset navigation
+                        deltaElements = [];
+                        currentDeltaIdx = -1;
+                        
+                    } catch(e) { alert("Fehler beim Rendern der Editoren: " + e); }
                 }
 
                 function drawLines() {
@@ -723,7 +752,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         if (!svg || !leftEditor || !rightEditor || !container) return;
                         
                         while (svg.firstChild) { svg.removeChild(svg.firstChild); }
-
+                        
+                        const chkMaster = document.getElementById('chk-show-lines');
+                        const showLines = chkMaster ? chkMaster.checked : true;
+                        if (!showLines) return;
+                        
                         const svgWidth = container.clientWidth || 100;
                         const lScroll = leftEditor.scrollTop;
                         const rScroll = rightEditor.scrollTop;
