@@ -1,6 +1,6 @@
 # main.py
 # ANFANG
-# main.py (V38.19 - Zombie Task Killer)
+# main.py (V38.21- - Zombie Task Killer)
 import sys
 import threading
 import webbrowser
