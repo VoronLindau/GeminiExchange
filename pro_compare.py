@@ -15,7 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.11"
+APP_VERSION = "v5.13"
 
 # Globale Variable für den Fortschritt
 PROGRESS_STATE = {"status": "Bereit", "percent": 0}
@@ -167,7 +167,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
         
     total_p1 = len(parsed1)
     
-    # SCHRITT 1: Exakte Treffer finden
     PROGRESS_STATE = {"status": "Suche exakte Treffer...", "percent": 20}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -180,7 +179,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                     matched_indices_2.add(j)
                     break
                     
-    # SCHRITT 2: Fuzzy-Suche für den Rest (wiederhergestellt aus V5.7)
     PROGRESS_STATE = {"status": "Suche Ähnlichkeiten (Fuzzy)...", "percent": 30}
     for i, (raw1, cols1) in enumerate(parsed1):
         if total_p1 > 0 and i % max(1, total_p1 // 50) == 0:
@@ -215,7 +213,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
-    # SCHRITT 3: HTML Zusammenbauen
     PROGRESS_STATE = {"status": "Baue HTML-Oberfläche...", "percent": 85}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -244,7 +241,9 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                 'raw_right': raw2.splitlines(keepends=True) if raw2 else [],
                 'ratio': round(key_ratio, 1),
                 'dup_left': dup_left,
-                'dup_right': dup_right
+                'dup_right': dup_right,
+                'count_l': 1, 
+                'count_r': 1
             })
         else:
             diff_data.append({
@@ -254,7 +253,9 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                 'raw_right': [],
                 'ratio': 0,
                 'dup_left': dup_left,
-                'dup_right': False
+                'dup_right': False,
+                'count_l': 1, 
+                'count_r': 0
             })
         block_id += 1
         
@@ -272,7 +273,9 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                 'raw_right': raw2.splitlines(keepends=True) if raw2 else [],
                 'ratio': 0,
                 'dup_left': False,
-                'dup_right': dup_right
+                'dup_right': dup_right,
+                'count_l': 0, 
+                'count_r': 1
             })
             block_id += 1
             
@@ -334,7 +337,9 @@ def berechne_diff_daten(text1, text2):
             'raw_right': block_right,
             'ratio': ratio,
             'dup_left': dup_left,
-            'dup_right': dup_right
+            'dup_right': dup_right,
+            'count_l': len(block_left), 
+            'count_r': len(block_right)
         })
         block_id += 1
         
@@ -798,8 +803,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     let statsR = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0, dups: 0 };
 
                     diffData.forEach(b => {
-                        let linesL = b.raw_left ? b.raw_left.length : 0;
-                        let linesR = b.raw_right ? b.raw_right.length : 0;
+                        let linesL = b.count_l !== undefined ? b.count_l : 0;
+                        let linesR = b.count_r !== undefined ? b.count_r : 0;
                         
                         statsL.total += linesL;
                         statsR.total += linesR;
@@ -826,7 +831,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         <div style="display: flex; gap: 15px;">
                             <div style="flex: 1; border-right: 1px solid #444; padding-right: 15px;">
                                 <div class="stat-header">LINKS (Original)</div>
-                                <div class="stat-row" style="margin-bottom:6px;"><span>Gesamtzeilen:</span> <span class="stat-num">${statsL.total}</span></div>
+                                <div class="stat-row" style="margin-bottom:6px;"><span>Datensätze/Zeilen:</span> <span class="stat-num">${statsL.total}</span></div>
                                 ${createStatRow('Duplikate gefunden:', statsL.dups, 'dups', '#6f42c1')}
                                 ${createStatRow('Ohne Partner:', statsL.unmatch, 'delete', '#dc3545')}
                                 <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
@@ -839,7 +844,7 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             </div>
                             <div style="flex: 1;">
                                 <div class="stat-header">RECHTS (Geändert)</div>
-                                <div class="stat-row" style="margin-bottom:6px;"><span>Gesamtzeilen:</span> <span class="stat-num">${statsR.total}</span></div>
+                                <div class="stat-row" style="margin-bottom:6px;"><span>Datensätze/Zeilen:</span> <span class="stat-num">${statsR.total}</span></div>
                                 ${createStatRow('Duplikate gefunden:', statsR.dups, 'dups', '#6f42c1')}
                                 ${createStatRow('Ohne Partner:', statsR.unmatch, 'insert', '#28a745')}
                                 <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
@@ -909,16 +914,23 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         let badgeL = block.dup_left ? '<div class="dup-badge">⚠️ DUPLIKAT</div><br>' : '';
                         let badgeR = block.dup_right ? '<div class="dup-badge">⚠️ DUPLIKAT</div><br>' : '';
 
+                        // FIX v5.13: Nutze die physischen Zeilen für die UI-Platzhalter (damit Blöcke gleich hoch bleiben!)
+                        let linesCountL = block.raw_left ? Math.max(1, block.raw_left.length) : 1;
+                        let linesCountR = block.raw_right ? Math.max(1, block.raw_right.length) : 1;
+                        
+                        let emptySpacerL = '\\n'.repeat(linesCountR);
+                        let emptySpacerR = '\\n'.repeat(linesCountL);
+
                         const leftDiv = document.createElement('div');
                         leftDiv.id = `left-block-${block.id}`; leftDiv.className = `code-block tag-${block.tag}`;
                         leftDiv.setAttribute('data-tag', block.tag); leftDiv.setAttribute('data-ratio', block.ratio);
-                        leftDiv.innerHTML = badgeL + (block.left.length > 0 ? block.left.join('') : '\\n'.repeat(block.right.length));
+                        leftDiv.innerHTML = badgeL + (block.left.length > 0 ? block.left.join('') : emptySpacerL);
                         leftEditor.appendChild(leftDiv);
 
                         const rightDiv = document.createElement('div');
                         rightDiv.id = `right-block-${block.id}`; rightDiv.className = `code-block tag-${block.tag}`;
                         rightDiv.setAttribute('data-tag', block.tag); rightDiv.setAttribute('data-ratio', block.ratio);
-                        rightDiv.innerHTML = badgeR + (block.right.length > 0 ? block.right.join('') : '\\n'.repeat(block.left.length));
+                        rightDiv.innerHTML = badgeR + (block.right.length > 0 ? block.right.join('') : emptySpacerR);
                         rightEditor.appendChild(rightDiv);
                         
                         const row = document.createElement('div');
