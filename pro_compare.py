@@ -15,7 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.13"
+APP_VERSION = "v5.14"
 
 # Globale Variable für den Fortschritt
 PROGRESS_STATE = {"status": "Bereit", "percent": 0}
@@ -167,6 +167,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
         
     total_p1 = len(parsed1)
     
+    # SCHRITT 1: Exakte Treffer finden
     PROGRESS_STATE = {"status": "Suche exakte Treffer...", "percent": 20}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -179,6 +180,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                     matched_indices_2.add(j)
                     break
                     
+    # SCHRITT 2: Fuzzy-Suche für den Rest
     PROGRESS_STATE = {"status": "Suche Ähnlichkeiten (Fuzzy)...", "percent": 30}
     for i, (raw1, cols1) in enumerate(parsed1):
         if total_p1 > 0 and i % max(1, total_p1 // 50) == 0:
@@ -213,6 +215,7 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
+    # SCHRITT 3: HTML Zusammenbauen & Datensätze strikt mit 1 zählen
     PROGRESS_STATE = {"status": "Baue HTML-Oberfläche...", "percent": 85}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -789,12 +792,17 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     setTimeout(drawLines, 300);
                 }
 
-                function createStatRow(label, count, filterKey, color) {
+                // NEU v5.14: Berechnet die Prozentzahl zur Gesamtsumme
+                function createStatRow(label, count, total, filterKey, color) {
                     let isActive = (activeFilter === filterKey);
                     let activeStyle = isActive ? 'background: #007acc; color: white; border-color: #4dc3ff;' : '';
+                    let pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                    
+                    let countDisplay = `${count} <span style="font-size:0.85em; opacity:0.7; font-weight:normal; margin-left:4px;">[${pct}%]</span>`;
+                    
                     return `<div class="stat-row clickable-stat" style="${activeStyle}" onclick="setFilter('${filterKey}')" title="Klicken, um diesen Datensatz zu filtern">
                                 <span>${label}</span>
-                                <span class="stat-num" style="color:${isActive ? 'white' : color}">${count}</span>
+                                <span class="stat-num" style="color:${isActive ? 'white' : color}">${countDisplay}</span>
                             </div>`;
                 }
 
@@ -827,33 +835,34 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         }
                     });
 
+                    // Update UI mit createStatRow und dem "total" Parameter
                     let html = `
                         <div style="display: flex; gap: 15px;">
                             <div style="flex: 1; border-right: 1px solid #444; padding-right: 15px;">
                                 <div class="stat-header">LINKS (Original)</div>
                                 <div class="stat-row" style="margin-bottom:6px;"><span>Datensätze/Zeilen:</span> <span class="stat-num">${statsL.total}</span></div>
-                                ${createStatRow('Duplikate gefunden:', statsL.dups, 'dups', '#6f42c1')}
-                                ${createStatRow('Ohne Partner:', statsL.unmatch, 'delete', '#dc3545')}
+                                ${createStatRow('Duplikate gefunden:', statsL.dups, statsL.total, 'dups', '#6f42c1')}
+                                ${createStatRow('Ohne Partner:', statsL.unmatch, statsL.total, 'delete', '#dc3545')}
                                 <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
-                                ${createStatRow('100% (Spalte gleich):', statsL.exakt, '100', '#d4d4d4')}
-                                ${createStatRow('90% - 99%:', statsL.m90, '90', '#d4d4d4')}
-                                ${createStatRow('80% - 89%:', statsL.m80, '80', '#d4d4d4')}
-                                ${createStatRow('70% - 79%:', statsL.m70, '70', '#d4d4d4')}
-                                ${createStatRow('60% - 69%:', statsL.m60, '60', '#d4d4d4')}
-                                ${createStatRow('< 60%:', statsL.mLow, 'low', '#d4d4d4')}
+                                ${createStatRow('100% (Spalte gleich):', statsL.exakt, statsL.total, '100', '#d4d4d4')}
+                                ${createStatRow('90% - 99%:', statsL.m90, statsL.total, '90', '#d4d4d4')}
+                                ${createStatRow('80% - 89%:', statsL.m80, statsL.total, '80', '#d4d4d4')}
+                                ${createStatRow('70% - 79%:', statsL.m70, statsL.total, '70', '#d4d4d4')}
+                                ${createStatRow('60% - 69%:', statsL.m60, statsL.total, '60', '#d4d4d4')}
+                                ${createStatRow('< 60%:', statsL.mLow, statsL.total, 'low', '#d4d4d4')}
                             </div>
                             <div style="flex: 1;">
                                 <div class="stat-header">RECHTS (Geändert)</div>
                                 <div class="stat-row" style="margin-bottom:6px;"><span>Datensätze/Zeilen:</span> <span class="stat-num">${statsR.total}</span></div>
-                                ${createStatRow('Duplikate gefunden:', statsR.dups, 'dups', '#6f42c1')}
-                                ${createStatRow('Ohne Partner:', statsR.unmatch, 'insert', '#28a745')}
+                                ${createStatRow('Duplikate gefunden:', statsR.dups, statsR.total, 'dups', '#6f42c1')}
+                                ${createStatRow('Ohne Partner:', statsR.unmatch, statsR.total, 'insert', '#28a745')}
                                 <div style="margin-top: 6px; border-top: 1px dashed #444; padding-top: 6px;"></div>
-                                ${createStatRow('100% (Spalte gleich):', statsR.exakt, '100', '#d4d4d4')}
-                                ${createStatRow('90% - 99%:', statsR.m90, '90', '#d4d4d4')}
-                                ${createStatRow('80% - 89%:', statsR.m80, '80', '#d4d4d4')}
-                                ${createStatRow('70% - 79%:', statsR.m70, '70', '#d4d4d4')}
-                                ${createStatRow('60% - 69%:', statsR.m60, '60', '#d4d4d4')}
-                                ${createStatRow('< 60%:', statsR.mLow, 'low', '#d4d4d4')}
+                                ${createStatRow('100% (Spalte gleich):', statsR.exakt, statsR.total, '100', '#d4d4d4')}
+                                ${createStatRow('90% - 99%:', statsR.m90, statsR.total, '90', '#d4d4d4')}
+                                ${createStatRow('80% - 89%:', statsR.m80, statsR.total, '80', '#d4d4d4')}
+                                ${createStatRow('70% - 79%:', statsR.m70, statsR.total, '70', '#d4d4d4')}
+                                ${createStatRow('60% - 69%:', statsR.m60, statsR.total, '60', '#d4d4d4')}
+                                ${createStatRow('< 60%:', statsR.mLow, statsR.total, 'low', '#d4d4d4')}
                             </div>
                         </div>
                     `;
@@ -914,7 +923,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         let badgeL = block.dup_left ? '<div class="dup-badge">⚠️ DUPLIKAT</div><br>' : '';
                         let badgeR = block.dup_right ? '<div class="dup-badge">⚠️ DUPLIKAT</div><br>' : '';
 
-                        // FIX v5.13: Nutze die physischen Zeilen für die UI-Platzhalter (damit Blöcke gleich hoch bleiben!)
                         let linesCountL = block.raw_left ? Math.max(1, block.raw_left.length) : 1;
                         let linesCountR = block.raw_right ? Math.max(1, block.raw_right.length) : 1;
                         
