@@ -15,7 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.14"
+APP_VERSION = "v5.15"
 
 # Globale Variable für den Fortschritt
 PROGRESS_STATE = {"status": "Bereit", "percent": 0}
@@ -167,7 +167,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
         
     total_p1 = len(parsed1)
     
-    # SCHRITT 1: Exakte Treffer finden
     PROGRESS_STATE = {"status": "Suche exakte Treffer...", "percent": 20}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -180,7 +179,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
                     matched_indices_2.add(j)
                     break
                     
-    # SCHRITT 2: Fuzzy-Suche für den Rest
     PROGRESS_STATE = {"status": "Suche Ähnlichkeiten (Fuzzy)...", "percent": 30}
     for i, (raw1, cols1) in enumerate(parsed1):
         if total_p1 > 0 and i % max(1, total_p1 // 50) == 0:
@@ -215,7 +213,6 @@ def berechne_csv_diff(text1, text2, col_l, col_r, delimiter, filters):
             matches[i] = (best_j, best_ratio)
             matched_indices_2.add(best_j)
             
-    # SCHRITT 3: HTML Zusammenbauen & Datensätze strikt mit 1 zählen
     PROGRESS_STATE = {"status": "Baue HTML-Oberfläche...", "percent": 85}
     for i, (raw1, cols1) in enumerate(parsed1):
         key1 = cols1[col_l] if col_l < len(cols1) else ""
@@ -517,7 +514,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                 mark.active-hit { background-color: #ff9800; color: white; box-shadow: 0 0 6px #ff9800; outline: 1px solid #fff;}
                 .percent-label { font-family: sans-serif; font-size: 10px; font-weight: bold; fill: #fff; text-anchor: middle; dominant-baseline: middle; }
                 .label-bg { fill: #007bff; rx: 4; ry: 4; }
-                .btn-excel { background-color: #217346; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; font-weight: bold; display: flex; align-items: center; gap: 4px; transition: background-color 0.2s;}
+                .btn-excel { background-color: #217346; color: white; border: none; padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; font-weight: bold; display: flex; align-items: center; gap: 4px; transition: background-color 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.3);}
+                .btn-excel:hover { background-color: #1a5c38; }
                 
                 #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; display: none; flex-direction: column; justify-content: center; align-items: center; color: white; font-family: 'Segoe UI', sans-serif;}
                 .spinner { border: 6px solid #333; border-top: 6px solid var(--accent); border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin-bottom: 25px; }
@@ -619,7 +617,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     <div class="summary-header">
                         <span style="flex: 1; text-align: left; margin-top: 3px;">ÜBERSICHT & STATISTIK</span>
                         <div style="display: flex; gap: 10px;">
-                            <button class="btn-excel" onclick="exportExcel()">📥 EXCEL</button>
+                            <!-- NEU v5.15: Umbenannter Excel Button -->
+                            <button class="btn-excel" onclick="exportExcel()">📥 EXCEL REPORT</button>
                             <button onclick="toggleSummary()" style="background:none; border:none; color:#aaa; cursor:pointer; font-size: 14px;" title="Panel schließen">✖</button>
                         </div>
                     </div>
@@ -792,12 +791,10 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     setTimeout(drawLines, 300);
                 }
 
-                // NEU v5.14: Berechnet die Prozentzahl zur Gesamtsumme
                 function createStatRow(label, count, total, filterKey, color) {
                     let isActive = (activeFilter === filterKey);
                     let activeStyle = isActive ? 'background: #007acc; color: white; border-color: #4dc3ff;' : '';
                     let pct = total > 0 ? Math.round((count / total) * 100) : 0;
-                    
                     let countDisplay = `${count} <span style="font-size:0.85em; opacity:0.7; font-weight:normal; margin-left:4px;">[${pct}%]</span>`;
                     
                     return `<div class="stat-row clickable-stat" style="${activeStyle}" onclick="setFilter('${filterKey}')" title="Klicken, um diesen Datensatz zu filtern">
@@ -835,7 +832,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         }
                     });
 
-                    // Update UI mit createStatRow und dem "total" Parameter
                     let html = `
                         <div style="display: flex; gap: 15px;">
                             <div style="flex: 1; border-right: 1px solid #444; padding-right: 15px;">
@@ -869,11 +865,93 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     document.getElementById('statistics-content').innerHTML = html;
                 }
 
+                // NEU v5.15: Der aufgeborte Excel-Report Generator
                 function exportExcel() {
                     const pathLeft = document.getElementById('path-left').textContent;
                     const pathRight = document.getElementById('path-right').textContent;
-                    let htmlTable = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>table { border-collapse: collapse; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; } th { background-color: #333333; color: #ffffff; padding: 6px; text-align: left; border: 1px solid #777777; font-weight: bold;} td { border: 1px solid #cccccc; padding: 4px 6px; vertical-align: top; mso-number-format: "\\@"; }</style></head><body><table><tr><th>Original (Links):<br><span style="font-weight: normal; font-size: 10px;">${pathLeft}</span></th><th>Übereinstimmung</th><th>Geändert (Rechts):<br><span style="font-weight: normal; font-size: 10px;">${pathRight}</span></th></tr>`;
+                    const timestamp = new Date().toLocaleString('de-DE');
+                    
+                    // 1. Berechne Statistikwerte direkt für den Report nochmal (als Klartext)
+                    let statsL = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0, dups: 0 };
+                    let statsR = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0, dups: 0 };
 
+                    diffData.forEach(b => {
+                        let linesL = b.count_l !== undefined ? b.count_l : 0;
+                        let linesR = b.count_r !== undefined ? b.count_r : 0;
+                        statsL.total += linesL; statsR.total += linesR;
+                        if (b.dup_left) statsL.dups += linesL;
+                        if (b.dup_right) statsR.dups += linesR;
+
+                        if (b.tag === 'equal') { statsL.exakt += linesL; statsR.exakt += linesR; }
+                        else if (b.tag === 'delete') { statsL.unmatch += linesL; }
+                        else if (b.tag === 'insert') { statsR.unmatch += linesR; }
+                        else if (b.tag === 'replace') {
+                            if (b.ratio >= 90) { statsL.m90 += linesL; statsR.m90 += linesR; }
+                            else if (b.ratio >= 80) { statsL.m80 += linesL; statsR.m80 += linesR; }
+                            else if (b.ratio >= 70) { statsL.m70 += linesL; statsR.m70 += linesR; }
+                            else if (b.ratio >= 60) { statsL.m60 += linesL; statsR.m60 += linesR; }
+                            else { statsL.mLow += linesL; statsR.mLow += linesR; }
+                        }
+                    });
+                    
+                    const pct = (val, total) => total > 0 ? Math.round((val / total) * 100) + '%' : '0%';
+
+                    // 2. HTML Template mit eingebetteter Statistik-Tabelle
+                    let htmlTable = `
+                    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+                    <head>
+                        <meta charset="utf-8">
+                        <style>
+                            body { font-family: 'Segoe UI', Arial, sans-serif; }
+                            table { border-collapse: collapse; font-size: 12px; margin-bottom: 20px; }
+                            th, td { border: 1px solid #cccccc; padding: 5px 8px; vertical-align: top; mso-number-format: "\\@"; }
+                            .hdr-main { background-color: #005b99; color: #ffffff; font-weight: bold; font-size: 14px; text-align: left;}
+                            .hdr-col { background-color: #333333; color: #ffffff; font-weight: bold; }
+                            .stat-title { font-weight: bold; background-color: #f4f4f4; }
+                            .val-left { text-align: right; }
+                            .val-right { text-align: right; border-left: 2px solid #aaa; }
+                        </style>
+                    </head>
+                    <body>
+                        <h2>Advanced Delta Report (${APP_VERSION})</h2>
+                        
+                        <!-- TABELLE 1: METADATEN -->
+                        <table>
+                            <tr><td class="stat-title" style="width: 150px;">Erstellt am:</td><td colspan="2">${timestamp}</td></tr>
+                            <tr><td class="stat-title">Original (Links):</td><td colspan="2">${pathLeft}</td></tr>
+                            <tr><td class="stat-title">Geändert (Rechts):</td><td colspan="2">${pathRight}</td></tr>
+                            <tr><td class="stat-title">Aktiver UI-Filter:</td><td colspan="2" style="color:#007acc; font-weight:bold;">${activeFilter.toUpperCase()}</td></tr>
+                        </table>
+                        
+                        <!-- TABELLE 2: STATISTIK -->
+                        <table>
+                            <tr>
+                                <th class="hdr-main">Statistische Auswertung</th>
+                                <th class="hdr-main" style="text-align: right;">LINKS (Original)</th>
+                                <th class="hdr-main" style="text-align: right; border-left: 2px solid #fff;">RECHTS (Geändert)</th>
+                            </tr>
+                            <tr><td class="stat-title">Gesamt Datensätze/Zeilen</td><td class="val-left"><b>${statsL.total}</b></td><td class="val-right"><b>${statsR.total}</b></td></tr>
+                            <tr><td class="stat-title">Duplikate (Mehrfache IDs)</td><td class="val-left" style="color:#6f42c1;">${statsL.dups} (${pct(statsL.dups, statsL.total)})</td><td class="val-right" style="color:#6f42c1;">${statsR.dups} (${pct(statsR.dups, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ohne Partner (Neu / Gelöscht)</td><td class="val-left" style="color:#dc3545;">${statsL.unmatch} (${pct(statsL.unmatch, statsL.total)})</td><td class="val-right" style="color:#28a745;">${statsR.unmatch} (${pct(statsR.unmatch, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">100% Identisch</td><td class="val-left">${statsL.exakt} (${pct(statsL.exakt, statsL.total)})</td><td class="val-right">${statsR.exakt} (${pct(statsR.exakt, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ähnlich (90% - 99%)</td><td class="val-left">${statsL.m90} (${pct(statsL.m90, statsL.total)})</td><td class="val-right">${statsR.m90} (${pct(statsR.m90, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ähnlich (80% - 89%)</td><td class="val-left">${statsL.m80} (${pct(statsL.m80, statsL.total)})</td><td class="val-right">${statsR.m80} (${pct(statsR.m80, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ähnlich (70% - 79%)</td><td class="val-left">${statsL.m70} (${pct(statsL.m70, statsL.total)})</td><td class="val-right">${statsR.m70} (${pct(statsR.m70, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ähnlich (60% - 69%)</td><td class="val-left">${statsL.m60} (${pct(statsL.m60, statsL.total)})</td><td class="val-right">${statsR.m60} (${pct(statsR.m60, statsR.total)})</td></tr>
+                            <tr><td class="stat-title">Ähnlich (< 60%)</td><td class="val-left">${statsL.mLow} (${pct(statsL.mLow, statsL.total)})</td><td class="val-right">${statsR.mLow} (${pct(statsR.mLow, statsR.total)})</td></tr>
+                        </table>
+                        
+                        <br>
+
+                        <!-- TABELLE 3: DELTAS -->
+                        <table style="font-family: 'Consolas', 'Courier New', monospace;">
+                            <tr>
+                                <th class="hdr-col">Original (Links)</th>
+                                <th class="hdr-col" style="text-align:center;">Abgleich</th>
+                                <th class="hdr-col">Geändert (Rechts)</th>
+                            </tr>`;
+
+                    // 3. Füge die gefilterten Detail-Zeilen hinzu
                     diffData.forEach(block => {
                         if (!shouldShow(block.tag, block.ratio, block.dup_left, block.dup_right)) return;
                         
@@ -907,10 +985,12 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         </tr>`;
                     });
                     htmlTable += `</table></body></html>`;
+                    
+                    // 4. Download triggern
                     const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
-                    a.href = url; a.download = 'Delta_Zusammenfassung.xls';
+                    a.href = url; a.download = 'Advanced_Delta_Report.xls';
                     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
                 }
 
