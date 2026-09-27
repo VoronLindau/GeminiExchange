@@ -15,7 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 csv.field_size_limit(sys.maxsize)
 
 # --- App Konfiguration ---
-APP_VERSION = "v5.15"
+APP_VERSION = "v5.16"
 
 # Globale Variable für den Fortschritt
 PROGRESS_STATE = {"status": "Bereit", "percent": 0}
@@ -617,7 +617,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     <div class="summary-header">
                         <span style="flex: 1; text-align: left; margin-top: 3px;">ÜBERSICHT & STATISTIK</span>
                         <div style="display: flex; gap: 10px;">
-                            <!-- NEU v5.15: Umbenannter Excel Button -->
                             <button class="btn-excel" onclick="exportExcel()">📥 EXCEL REPORT</button>
                             <button onclick="toggleSummary()" style="background:none; border:none; color:#aaa; cursor:pointer; font-size: 14px;" title="Panel schließen">✖</button>
                         </div>
@@ -865,13 +864,11 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     document.getElementById('statistics-content').innerHTML = html;
                 }
 
-                // NEU v5.15: Der aufgeborte Excel-Report Generator
                 function exportExcel() {
                     const pathLeft = document.getElementById('path-left').textContent;
                     const pathRight = document.getElementById('path-right').textContent;
                     const timestamp = new Date().toLocaleString('de-DE');
                     
-                    // 1. Berechne Statistikwerte direkt für den Report nochmal (als Klartext)
                     let statsL = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0, dups: 0 };
                     let statsR = { total: 0, unmatch: 0, exakt: 0, m90: 0, m80: 0, m70: 0, m60: 0, mLow: 0, dups: 0 };
 
@@ -896,7 +893,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     
                     const pct = (val, total) => total > 0 ? Math.round((val / total) * 100) + '%' : '0%';
 
-                    // 2. HTML Template mit eingebetteter Statistik-Tabelle
                     let htmlTable = `
                     <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
                     <head>
@@ -913,9 +909,8 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         </style>
                     </head>
                     <body>
-                        <h2>Advanced Delta Report (${APP_VERSION})</h2>
+                        <h2>Advanced Delta Report (APP_VERSION)</h2>
                         
-                        <!-- TABELLE 1: METADATEN -->
                         <table>
                             <tr><td class="stat-title" style="width: 150px;">Erstellt am:</td><td colspan="2">${timestamp}</td></tr>
                             <tr><td class="stat-title">Original (Links):</td><td colspan="2">${pathLeft}</td></tr>
@@ -923,7 +918,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                             <tr><td class="stat-title">Aktiver UI-Filter:</td><td colspan="2" style="color:#007acc; font-weight:bold;">${activeFilter.toUpperCase()}</td></tr>
                         </table>
                         
-                        <!-- TABELLE 2: STATISTIK -->
                         <table>
                             <tr>
                                 <th class="hdr-main">Statistische Auswertung</th>
@@ -943,7 +937,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                         
                         <br>
 
-                        <!-- TABELLE 3: DELTAS -->
                         <table style="font-family: 'Consolas', 'Courier New', monospace;">
                             <tr>
                                 <th class="hdr-col">Original (Links)</th>
@@ -951,7 +944,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                                 <th class="hdr-col">Geändert (Rechts)</th>
                             </tr>`;
 
-                    // 3. Füge die gefilterten Detail-Zeilen hinzu
                     diffData.forEach(block => {
                         if (!shouldShow(block.tag, block.ratio, block.dup_left, block.dup_right)) return;
                         
@@ -986,7 +978,6 @@ class DiffRequestHandler(BaseHTTPRequestHandler):
                     });
                     htmlTable += `</table></body></html>`;
                     
-                    // 4. Download triggern
                     const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
